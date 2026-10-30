@@ -26,7 +26,8 @@ public enum Parsers {
         text.split(separator: "\n").compactMap { line in
             let pattern = /^\s*(\d+)\s+(.+?)\s+\((.+?)\s*->\s*(.+?)\)\s*$/
             guard let m = try? pattern.firstMatch(in: String(line)) else { return nil }
-            return OutdatedItem(source: .appStore, name: String(m.2), installed: String(m.3), latest: String(m.4))
+            return OutdatedItem(source: .appStore, name: String(m.2), installed: String(m.3), latest: String(m.4),
+                                appID: String(m.1))
         }
     }
 

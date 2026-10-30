@@ -7,15 +7,15 @@
 
 # Tazele
 
-Mac'teki her şeyi tek yerden güncelleyen menü çubuğu uygulaması. Homebrew (formül ve cask), App Store ve global npm paketlerini tarar, nelerin eski olduğunu listeler, istediğini tek tek ya da hepsini birden günceller. macOS güncellemeleri yalnızca listelenir. pipx/uv, rustup ve Oh-My-Zsh planlanıyor.
+Mac'teki her şeyi tek yerden güncelleyen uygulama; menü çubuğunda ve pencerede çalışır. Homebrew (formül, cask ve kendi güncelleyen cask'ler), App Store, global npm paketleri ve kendi güncelleyicisi olan (Sparkle) uygulamaları tarar; seçtiklerini canlı günlükle günceller. macOS güncellemeleri yalnızca listelenir. Kurulu olmayan araçlar atlanır. Arayüz Türkçe ve İngilizce, sistem diline göre seçilir.
 
-> Durum: MVP geliştiriliyor. Homebrew, App Store ve npm taranıyor ve güncelleniyor; macOS güncellemeleri listelenip Sistem Ayarları açılıyor.
+> Durum: MVP. Arka planda yalnızca kontrol eder, güncellemeleri sen onaylayınca yükler; henüz imzalı/noter onaylı bir sürüm yok, kaynaktan derlenir.
 
 ```bash
 swift build && swift test
-.build/debug/Tazele           # menü çubuğu
-.build/debug/Tazele --window  # aynı arayüz sıradan pencerede
-scripts/build-app.sh          # build/Tazele.app
+.build/debug/Tazele    # pencere + menü çubuğu
+scripts/build-app.sh   # build/Tazele.app (simge, dil dosyaları dahil)
+python3 scripts/check-strings.py   # çeviri tablosu denetimi
 ```
 
 ## Plan

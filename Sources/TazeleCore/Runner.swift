@@ -3,22 +3,50 @@ import Foundation
 public struct CommandResult: Sendable {
     public let status: Int32
     public let output: Data
+    public let timedOut: Bool
     public var text: String { String(decoding: output, as: UTF8.self) }
 }
 
 /// GUI uygulamaları kabuğun PATH'ini almaz; bu yüzden ortam açıkça kurulur.
-public enum Environment {
+public enum ShellEnvironment {
+    /// Kullanıcının giriş kabuğundaki PATH (nvm, asdf, pnpm vb.). Bir kez okunur, önbelleğe alınır.
+    static let loginPath: [String] = readLoginPath()
+
+    private static func readLoginPath(timeout: TimeInterval = 5) -> [String] {
+        let shell = ProcessInfo.processInfo.environment["SHELL"].flatMap {
+            FileManager.default.isExecutableFile(atPath: $0) ? $0 : nil } ?? "/bin/zsh"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shell)
+        process.arguments = ["-ilc", "printf '\\n__TAZELE_PATH__%s\\n' \"$PATH\""]
+        let out = Pipe()
+        process.standardOutput = out
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        let done = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in done.signal() }
+        guard (try? process.run()) != nil else { return [] }
+        if done.wait(timeout: .now() + timeout) == .timedOut { process.terminate(); return [] }
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        guard let line = text.split(separator: "\n").last(where: { $0.hasPrefix("__TAZELE_PATH__") }) else { return [] }
+        return line.dropFirst("__TAZELE_PATH__".count).split(separator: ":").map(String.init)
+    }
+
     public static func make() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let home = NSHomeDirectory()
-        let extra = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "\(home)/.local/bin",
+        let known = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "\(home)/.local/bin",
                      "\(home)/.cargo/bin", "\(home)/.volta/bin"]
-        env["PATH"] = (extra + ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]).joined(separator: ":")
+        var seen = Set<String>()
+        env["PATH"] = (known + loginPath + ["/usr/bin", "/bin", "/usr/sbin", "/sbin"])
+            .filter { seen.insert($0).inserted }.joined(separator: ":")
         env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
         env["HOMEBREW_NO_ENV_HINTS"] = "1"
+        env["HOMEBREW_NO_ASK"] = "1"   // brew 6 varsayılan olarak onay ister; GUI'de takılır
         env["MAS_NO_AUTO_INDEX"] = "1"
         env["NONINTERACTIVE"] = "1"
         env["CI"] = "1"
+        // Terminalsiz ortamda sudo / brew parolayı bu pencereden sorar.
+        if let askpass = try? Privilege.installAskpass() { env["SUDO_ASKPASS"] = askpass.path }
         return env
     }
 }
@@ -27,18 +55,21 @@ public enum Environment {
 public actor CommandRunner {
     public init() {}
 
-    /// Komutu çalıştırır; satırlar geldikçe `onLine` ile bildirilir. İptalde süreç sonlandırılır.
-    public func run(_ command: [String], onLine: (@Sendable (String) -> Void)? = nil) async throws -> CommandResult {
+    /// Komutu çalıştırır; satırlar geldikçe `onLine` ile bildirilir. İptalde veya zaman aşımında
+    /// süreç sonlandırılır (önce SIGTERM, 2 sn sonra SIGKILL).
+    public func run(_ command: [String], timeout: TimeInterval? = nil,
+                    onLine: (@Sendable (String) -> Void)? = nil) async throws -> CommandResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = command
-        process.environment = Environment.make()
+        process.environment = ShellEnvironment.make()
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
         process.standardInput = FileHandle.nullDevice
 
         let collector = Collector(onLine: onLine)
+        let timeoutFlag = TimeoutFlag()
         pipe.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
             if !chunk.isEmpty { collector.append(chunk) }
@@ -48,17 +79,36 @@ public actor CommandRunner {
                 process.terminationHandler = { p in
                     pipe.fileHandleForReading.readabilityHandler = nil
                     collector.append(pipe.fileHandleForReading.readDataToEndOfFile())
-                    cont.resume(returning: CommandResult(status: p.terminationStatus, output: collector.data))
+                    cont.resume(returning: CommandResult(status: p.terminationStatus, output: collector.data,
+                                                         timedOut: timeoutFlag.value))
                 }
                 do { try process.run() } catch {
                     pipe.fileHandleForReading.readabilityHandler = nil
                     cont.resume(throwing: error)
+                    return
+                }
+                if let timeout {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                        guard process.isRunning else { return }
+                        timeoutFlag.set()
+                        process.terminate()
+                        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                        }
+                    }
                 }
             }
         } onCancel: {
             if process.isRunning { process.terminate() }
         }
     }
+}
+
+private final class TimeoutFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    var value: Bool { lock.withLock { flag } }
+    func set() { lock.withLock { flag = true } }
 }
 
 private final class Collector: @unchecked Sendable {

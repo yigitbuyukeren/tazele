@@ -18,6 +18,7 @@ import Testing
         let items = Parsers.mas("497799835 Xcode (15.0 -> 15.1)\ngarbage\n")
         #expect(items.count == 1)
         #expect(items[0].name == "Xcode" && items[0].installed == "15.0" && items[0].latest == "15.1")
+        #expect(items[0].appID == "497799835")
     }
 
     @Test func npmEmptyOutputMeansUpToDate() throws {
@@ -43,5 +44,124 @@ import Testing
         ]
         let cmds = Updater.commands(for: items)
         #expect(cmds == [["brew", "upgrade", "--formula", "a"], ["brew", "upgrade", "--cask", "b"]])
+    }
+
+    @Test func appStoreUpdatesUseSudoWithAppIDs() {
+        let items = [
+            OutdatedItem(source: .appStore, name: "Xcode", installed: "1", latest: "2", appID: "111"),
+            OutdatedItem(source: .appStore, name: "Pages", installed: "1", latest: "2", appID: "222"),
+        ]
+        let cmd = Updater.commands(for: items).first ?? []
+        #expect(Array(cmd.prefix(2)) == ["sudo", "-A"])
+        #expect(cmd.suffix(3) == ["update", "111", "222"])
+        #expect(cmd[2].hasSuffix("mas") && cmd[2].hasPrefix("/"))
+    }
+
+    @Test func askpassIsWrittenPrivateAndExecutable() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tazele-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = try Privilege.installAskpass(in: dir)
+        let mode = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int
+        #expect(mode == 0o700)
+        #expect(try String(contentsOf: url, encoding: .utf8).hasPrefix("#!/bin/sh"))
+    }
+
+    @Test func locateFindsToolsByAbsolutePath() {
+        #expect(Privilege.locate("sh", path: "/nonexistent:/bin") == "/bin/sh")
+        #expect(Privilege.locate("no-such-tool-xyz", path: "/bin") == nil)
+    }
+
+    @Test func missingToolsAreSkippedNotReportedAsErrors() async {
+        let r = await Checker.checkAll(runner: CommandRunner(), searchPath: "/nonexistent")
+        #expect(r.missingTools == ["brew", "mas", "npm"])
+        #expect(r.errors.isEmpty)
+        #expect(r.items.allSatisfy { $0.source == .system || $0.source == .sparkle })
+    }
+
+    @Test func versionCompareHandlesNumbersAndPrereleases() {
+        #expect(VersionCompare.compare("1.54.2", "1.55.1") == .orderedAscending)
+        #expect(VersionCompare.compare("1.10", "1.9") == .orderedDescending)
+        #expect(VersionCompare.compare("1.0", "1.0.0") == .orderedSame)
+        #expect(VersionCompare.compare("1.0b2", "1.0") == .orderedAscending)
+        #expect(VersionCompare.compare("32.2.2", "33.0.0") == .orderedAscending)
+    }
+
+    @Test func appcastPicksNewestStableCompatibleItem() {
+        let xml = """
+        <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel>
+        <item><title>2.0 beta</title><sparkle:channel>beta</sparkle:channel>
+          <enclosure url="x" sparkle:version="200" sparkle:shortVersionString="2.0b"/></item>
+        <item><sparkle:version>150</sparkle:version><sparkle:shortVersionString>1.5</sparkle:shortVersionString>
+          <sparkle:minimumSystemVersion>99.0</sparkle:minimumSystemVersion></item>
+        <item><enclosure url="x" sparkle:version="120" sparkle:shortVersionString="1.2"/></item>
+        <item><enclosure url="x" sparkle:version="110" sparkle:shortVersionString="1.1"/></item>
+        </channel></rss>
+        """
+        let items = Sparkle.parseAppcast(Data(xml.utf8))
+        #expect(items.count == 4)
+        #expect(Sparkle.newest(in: items)?.shortVersion == "1.2")
+    }
+
+    @Test func sparkleOutdatedComparesBundleVersions() {
+        let app = SparkleApp(name: "Dia", path: "/Applications/Dia.app", bundleID: "x", shortVersion: "1.54.2",
+                             bundleVersion: "89247", feedURL: nil, isMacAppStore: false)
+        let newer = [AppcastItem(version: "89833", shortVersion: "1.55.1 (89833)")]
+        #expect(Sparkle.outdated(app: app, items: newer)?.latest == "1.55.1")
+        let same = [AppcastItem(version: "89247", shortVersion: "1.54.2")]
+        #expect(Sparkle.outdated(app: app, items: same) == nil)
+        #expect(Sparkle.outdated(app: app, items: []) == nil)
+    }
+
+    @Test func sameAppMatchingAvoidsCaskDuplicates() {
+        #expect(Sparkle.isSameApp("IINA", cask: "iina"))
+        #expect(Sparkle.isSameApp("Keka", cask: "keka"))
+        #expect(!Sparkle.isSameApp("Dia", cask: "iina"))
+    }
+
+    @Test func stableNamedChannelIsAcceptedButBetaIsNot() {
+        let items = [
+            AppcastItem(version: "300", shortVersion: "3.0rc", channel: "beta"),
+            AppcastItem(version: "200", shortVersion: "2.0", channel: "stable"),
+        ]
+        #expect(Sparkle.newest(in: items)?.shortVersion == "2.0")
+    }
+
+    @Test func hardwareRequirementsSkipOtherArchitectures() {
+        let items = [AppcastItem(version: "2", shortVersion: "2.0", hardware: "arm64"), AppcastItem(version: "1", shortVersion: "1.0")]
+        #expect(Sparkle.newest(in: items, arch: "x86_64")?.shortVersion == "1.0")
+        #expect(Sparkle.newest(in: items, arch: "arm64")?.shortVersion == "2.0")
+    }
+
+    @Test(arguments: [
+        ("v1.2", "1.2"), ("1.2 (r1234)", "1.2"), ("1.2-HEAD-abc", "1.2"), ("2.0.osx", "2.0"),
+        ("1.2,345", "1.2"), ("  3.4.5 ", "3.4.5"), ("1.55.1 (89833)", "1.55.1"),
+    ])
+    func versionNormalizerTable(raw: String, expected: String) {
+        #expect(VersionCompare.normalize(raw) == expected)
+        #expect(VersionCompare.compare(raw, expected) == .orderedSame)
+    }
+
+    @Test func runnerTimesOutAndKillsProcess() async throws {
+        let start = Date()
+        let r = try await CommandRunner().run(["sleep", "30"], timeout: 1)
+        #expect(r.timedOut)
+        #expect(Date().timeIntervalSince(start) < 8)
+    }
+
+    @Test func loginPathIsMergedWithoutDuplicates() {
+        let parts = (ShellEnvironment.make()["PATH"] ?? "").split(separator: ":")
+        #expect(Set(parts).count == parts.count)
+        #expect(parts.contains("/usr/bin"))
+    }
+
+    @Test func installedVersionReadsRealAppBundle() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tz-apps-\(UUID().uuidString)")
+        let contents = dir.appendingPathComponent("Ghostty.app/Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        (["CFBundleShortVersionString": "1.4.0", "CFBundleIdentifier": "x.y"] as NSDictionary)
+            .write(to: contents.appendingPathComponent("Info.plist"), atomically: true)
+        #expect(Sparkle.installedVersion(matchingCask: "ghostty", directories: [dir.path]) == "1.4.0")
+        #expect(Sparkle.installedVersion(matchingCask: "iina", directories: [dir.path]) == nil)
     }
 }
