@@ -67,8 +67,15 @@ public enum Checker {
             return result
         }
         // Besleme adresi okunamayan uygulamalar: Homebrew'ün cask listesiyle sürüm karşılaştırması.
-        let viaCasks = await SparkleFallback.updatesFromCaskIndex(
-            apps: feedless.filter { app in !casks.contains { Sparkle.isSameApp(app.name, cask: $0) } })
+        // Homebrew'ün kendi yönettiği uygulamalar brew grubunda gösterilir; burada tekrarlanmaz.
+        let unmanaged = feedless.filter { app in
+            !casks.contains { Sparkle.isSameApp(app.name, cask: $0) } && SparkleFallback.caskToken(for: app, in: caskIndex) == nil
+        }
+        async let cask = SparkleFallback.updatesFromCaskIndex(apps: unmanaged)
+        // `.pkg` ile kurulmuş uygulamalar (WARP, Tailscale): satıcı beslemesi veya pkgutil + cask eşlemesi.
+        async let pkg = PkgApps.updates(apps: unmanaged, runner: runner)
+        var viaCasks: [OutdatedItem] = []
+        for item in await cask + pkg where !viaCasks.contains(where: { $0.name == item.name }) { viaCasks.append(item) }
         // Cask listesiyle denetlenebilenler artık "okunamayan" sayılmaz.
         report.unknownFeedApps = feedless.map(\.name).filter { name in !viaCasks.contains { $0.name == name } }
         report.items += (found + viaCasks).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
