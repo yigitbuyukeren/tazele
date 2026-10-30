@@ -7,7 +7,7 @@
 
 # Tazele
 
-Mac'teki her şeyi tek yerden güncelleyen uygulama; menü çubuğunda ve pencerede çalışır. Homebrew (formül, cask ve kendi güncelleyen cask'ler), App Store, global npm paketleri ve kendi güncelleyicisi olan (Sparkle) uygulamaları tarar; seçtiklerini canlı günlükle günceller. Yeniden başlatma gerektirmeyen macOS güncellemeleri kurulabilir; diğerleri için Sistem Ayarları açılır. Kurulu olmayan araçlar atlanır. Arayüz Türkçe ve İngilizce, sistem diline göre seçilir.
+Mac'teki her şeyi tek yerden güncelleyen uygulama; menü çubuğunda ve pencerede çalışır. Homebrew (formül, cask ve kendi güncelleyen cask'ler), App Store, npm, rustup, RubyGems, pipx/uv, Oh My Zsh ve kendi güncelleyicisi olan (Sparkle) uygulamaları tarar; seçtiklerini canlı günlükle günceller. Yeniden başlatma gerektirmeyen macOS güncellemeleri kurulabilir; yeniden başlatma isteyenler için açık onaydan sonra "Kur ve yeniden başlat" ya da Sistem Ayarları kullanılır. Alt çubuktaki kilit düğmesiyle Touch ID veya parola bir kez verilir; yönetici gerektiren adımlar boşta 5 dakika yeniden sormaz (kalıcı sudo kuralı yazılmaz). Kurulu olmayan araçlar atlanır. Arayüz Türkçe ve İngilizce, sistem diline göre seçilir.
 
 App Store güncellemeleri için `mas` aracı root sahibi ve kullanıcı tarafından değiştirilemeyen bir konumda olmalıdır. Homebrew ile kurulan kullanıcıya ait `mas` güncellemeleri listeler; yüklemek için App Store açılır.
 

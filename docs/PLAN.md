@@ -32,6 +32,8 @@ Yapıldı: Homebrew (formül, cask, kendi güncelleyen cask), App Store (`mas` i
 
 Ayrıca: Sparkle uygulamalarını Tazele kendisi kurar (EdDSA imza doğrulama, kod imzası ve ekip kimliği kontrolü, geri alma); `.pkg` ile kurulanlar (WARP, Tailscale) satıcı beslemesiyle denetlenir; yönetici izni yerel yetki penceresiyle (Touch ID) istenir.
 
+Eklendi (30 Ekim 2026): alt çubukta yönetici izni düğmesi (Touch ID/parola, boşta 5 dakika); yeniden başlatma isteyen macOS güncellemeleri için onaylı "Kur ve yeniden başlat" (`softwareupdate -i --restart`, gerçek OS kurulumu denenmedi); güvenlik incelemesi düzeltmeleri `main`'de (149 test); varsayılan pencere 480×680.
+
 Yapılmadı: Developer ID imzası ve notarization; yetki penceresi, gerçek Sparkle kurulumu ve DMG çıkarma gerçek bir uygulamada denenmedi.
 
 
