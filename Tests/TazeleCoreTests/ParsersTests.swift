@@ -43,7 +43,7 @@ import Testing
             OutdatedItem(source: .system, name: "macOS", installed: "", latest: ""),
         ]
         let cmds = Updater.commands(for: items)
-        #expect(cmds == [["brew", "upgrade", "--formula", "a"], ["brew", "upgrade", "--cask", "b"]])
+        #expect(cmds == [["brew", "upgrade", "--formula", "--", "a"], ["brew", "upgrade", "--cask", "--", "b"]])
     }
 
     @Test func appStoreUpdatesUseSudoWithAppIDs() {
@@ -51,10 +51,7 @@ import Testing
             OutdatedItem(source: .appStore, name: "Xcode", installed: "1", latest: "2", appID: "111"),
             OutdatedItem(source: .appStore, name: "Pages", installed: "1", latest: "2", appID: "222"),
         ]
-        let cmd = Updater.commands(for: items).first ?? []
-        #expect(Array(cmd.prefix(2)) == ["sudo", "-A"])
-        #expect(cmd.suffix(3) == ["update", "111", "222"])
-        #expect(cmd[2].hasSuffix("mas") && cmd[2].hasPrefix("/"))
+        #expect(Updater.commands(for: items).isEmpty)
     }
 
     @Test func askpassIsWrittenPrivateAndExecutable() throws {
@@ -64,6 +61,36 @@ import Testing
         let mode = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int
         #expect(mode == 0o700)
         #expect(try String(contentsOf: url, encoding: .utf8).hasPrefix("#!/bin/sh"))
+    }
+
+    @Test func askpassRepairsTamperingWithoutFollowingLinks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("tazele-askpass-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let dir = root.appendingPathComponent("support")
+        let url = try Privilege.installAskpass(in: dir)
+        try Data("tampered".utf8).write(to: url)
+        let repaired = try Privilege.installAskpass(in: dir)
+        #expect(try Data(contentsOf: repaired) == Data(Privilege.script.utf8))
+        let target = root.appendingPathComponent("target")
+        let original = Data("untouched".utf8)
+        try original.write(to: target)
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.createSymbolicLink(at: url, withDestinationURL: target)
+        _ = try Privilege.installAskpass(in: dir)
+        #expect(try Data(contentsOf: target) == original)
+        #expect(Privilege.isIntactAskpass(at: url, expected: Data(Privilege.script.utf8)))
+    }
+
+    @Test func askpassRejectsLinkedSupportDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("tazele-askpass-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let actual = root.appendingPathComponent("actual")
+        try FileManager.default.createDirectory(at: actual, withIntermediateDirectories: true)
+        let link = root.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: actual)
+        #expect(throws: (any Error).self) { try Privilege.installAskpass(in: link) }
+        #expect(!FileManager.default.fileExists(atPath: actual.appendingPathComponent("askpass.sh").path))
     }
 
     @Test func locateFindsToolsByAbsolutePath() {

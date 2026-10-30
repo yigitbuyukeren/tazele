@@ -107,7 +107,7 @@ private func runScript(shell: String, bed: Bed, args: [String], hook: String? = 
     let flags = shell == RootSwap.shell ? ["-f", "-p", "-c"] : ["-c"]
     let p = Process()
     p.executableURL = URL(fileURLWithPath: shell)
-    p.arguments = flags + [RootSwap.Script.testVariant(), "tazele-swap"] + args
+    p.arguments = flags + [RootSwap.Script.testVariant(), "tazele-swap"] + args + ["1.0", "1"]
     var env = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TAZELE_TEST_APPS": bed.apps.path, "TAZELE_TEST_BASE": bed.base.path]
     if let hook { env["TAZELE_TEST_HOOK"] = hook }
     p.environment = env
@@ -217,7 +217,7 @@ private func cdh(_ app: URL) -> String {
         func request(installed: URL? = nil, staged s: URL? = nil, id: String = "test.tazele.fake",
                      version: String = "2", team t: String = team) -> RootSwap.Request {
             RootSwap.Request(installed: installed ?? URL(fileURLWithPath: "/Applications/Fake.app"), staged: s ?? staged,
-                             workDirectory: bed.work, bundleID: id, version: version, team: t, cdhash: fakeHash)
+                             workDirectory: bed.work, bundleID: id, version: version, team: t, cdhash: fakeHash, installedShortVersion: "1", installedVersion: "1")
         }
         // Geçici klasördeki "kurulu" uygulama /Applications değildir: biçimden reddedilir (dosya sistemine bakılmaz).
         let bad: [RootSwap.Request] = [
@@ -238,9 +238,9 @@ private func cdh(_ app: URL) -> String {
 
     @Test func argumentsArePositionalAndUnquoted() {
         let args = RootSwap.arguments(script: RootSwap.Script.production, installed: "/Applications/A B.app",
-                                      staged: "/w/x'y/A B.app", bundleID: "a.b", version: "1", team: team, cdhash: fakeHash)
+                                      staged: "/w/x'y/A B.app", bundleID: "a.b", version: "1", team: team, cdhash: fakeHash, installedShortVersion: "1", installedVersion: "1")
         #expect(args == ["/bin/zsh", "-f", "-p", "-c", RootSwap.Script.production, "tazele-swap",
-                         "/Applications/A B.app", "/w/x'y/A B.app", "a.b", "1", team, fakeHash])
+                         "/Applications/A B.app", "/w/x'y/A B.app", "a.b", "1", team, fakeHash, "1", "1"])
         #expect(RootSwap.requirement(team: team) == "=anchor apple generic and certificate leaf[subject.OU] = \"ABCDE12345\"")
     }
 
@@ -285,26 +285,11 @@ private func cdh(_ app: URL) -> String {
         try #require(getuid() != 0, "testler root olarak çalıştırılmamalı")
         let flags = shell == RootSwap.shell ? ["-f", "-p", "-c"] : ["-c"]
         let out = try output(shell, flags + [RootSwap.Script.production, "tazele-swap",
-                                             "/Applications/TazeleYok.app", "/nonexistent/TazeleYok.app", "a.b", "2", team, fakeHash])
+                                             "/Applications/TazeleYok.app", "/nonexistent/TazeleYok.app", "a.b", "2", team, fakeHash, "1.0", "1"])
         #expect(out.contains("__TAZELE_SWAP__ fail notroot"))
         #expect(!out.contains("step copy"))
         #expect(try run(shell, flags + [RootSwap.Script.production, "tazele-swap",
-                                        "/Applications/TazeleYok.app", "/nonexistent/TazeleYok.app", "a.b", "2", team, fakeHash]) == 11)
-    }
-
-    /// Üretim komutu, mevcut sarmalayıcıların tırnaklama katmanlarından bozulmadan geçer (osascript yolu,
-    /// yönetici yetkisi olmadan, pencere açılmaz): betik çalışır ve root olmadığı için 11 ile çıkar.
-    @Test func productionCommandSurvivesOsascriptWrapper() async throws {
-        try #require(getuid() != 0)
-        let root = try realTemp("osa")
-        defer { try? fm.removeItem(at: root) }
-        let command = RootSwap.arguments(script: RootSwap.Script.production, installed: "/Applications/Tazele Yok (1).app",
-                                         staged: "/nonexistent/it's/Tazele Yok (1).app", bundleID: "a.b", version: "2", team: team, cdhash: fakeHash)
-        let backend = OsascriptBackend(runner: CommandRunner(), administrator: false, temporaryRoot: root, pollInterval: 0.05)
-        let lines = Lines()
-        let r = try await backend.run(command, onLine: { lines.add($0) })
-        #expect(r.status == 11)
-        #expect(lines.all == ["__TAZELE_SWAP__ fail notroot"])
+                                        "/Applications/TazeleYok.app", "/nonexistent/TazeleYok.app", "a.b", "2", team, fakeHash, "1.0", "1"]) == 11)
     }
 
     /// Aynısı authorizationServices yolunun zsh sarmalayıcısıyla (yetkisiz, soket üzerinden).
@@ -313,7 +298,7 @@ private func cdh(_ app: URL) -> String {
         var fds: [Int32] = [0, 0]
         #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
         let command = RootSwap.arguments(script: RootSwap.Script.production, installed: "/Applications/X.app",
-                                         staged: "/nonexistent/$(id)/X.app", bundleID: "a.b", version: "2", team: team, cdhash: fakeHash)
+                                         staged: "/nonexistent/$(id)/X.app", bundleID: "a.b", version: "2", team: team, cdhash: fakeHash, installedShortVersion: "1", installedVersion: "1")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: RootScript.zsh)
         process.arguments = RootScript.zshArguments(nonce: "RS", command: command)
@@ -397,6 +382,20 @@ private func cdh(_ app: URL) -> String {
             #expect(!r.output.contains("step swap"), "\(c.name)")
             #expect(entries(bed.base).isEmpty, "\(c.name)")
         }
+    }
+
+    @Test(arguments: shells)
+    func scriptRejectsChangedInstalledVersion(shell: String) throws {
+        let bed = try Bed()
+        defer { bed.cleanup() }
+        let staged = try bed.stage()
+        let plist = bed.installed.appendingPathComponent("Contents/Info.plist")
+        let info = try #require(NSMutableDictionary(contentsOf: plist))
+        info["CFBundleVersion"] = "3"
+        #expect(info.write(to: plist, atomically: true))
+        let result = try runScript(shell: shell, bed: bed, args: [bed.installed.path, staged.path, "test.tazele.fake", "2", team, cdh(staged)])
+        #expect(result.status == 18)
+        #expect(version(bed.installed) == "3")
     }
 
     @Test(arguments: shells)
@@ -519,7 +518,7 @@ private func cdh(_ app: URL) -> String {
         let flags = shell == RootSwap.shell ? ["-f", "-p", "-c"] : ["-c"]
         let p = Process()
         p.executableURL = URL(fileURLWithPath: shell)
-        p.arguments = flags + [RootSwap.Script.testVariant(), "tazele-swap", bed.installed.path, staged.path, "test.tazele.fake", "2", team, cdh(staged)]
+        p.arguments = flags + [RootSwap.Script.testVariant(), "tazele-swap", bed.installed.path, staged.path, "test.tazele.fake", "2", team, cdh(staged), "1.0", "1"]
         p.environment = ["PATH": "/usr/bin:/bin", "TAZELE_TEST_APPS": bed.apps.path, "TAZELE_TEST_BASE": bed.base.path,
                          "TAZELE_TEST_HOOK": "slow-verify"]
         let out = bed.root.appendingPathComponent("out.log")

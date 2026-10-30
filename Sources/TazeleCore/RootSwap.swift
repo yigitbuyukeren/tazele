@@ -4,8 +4,9 @@ import Foundation
 //
 // Akış: indirme, EdDSA, arşivi açma, paket kimliği / sürüm / kod imzası / ekip / Apple kökü denetimleri
 // kullanıcı yetkisiyle `SparkleInstaller` içinde yapılır. Yalnızca son adım (değiştirme) root olarak çalışır:
-// `PrivilegedRunner.runSwap` → mevcut yöntem zinciri (authorizationServices → osascript → sudoAskpass)
-// → `/bin/zsh -f -p -c <sabit betik> tazele-swap <kurulu> <hazırlanan> <paket kimliği> <sürüm> <ekip> <CDHash>`.
+// `PrivilegedRunner.runSwap` → mevcut yöntem zinciri (authorizationServices → sudoAskpass)
+// → `/bin/zsh -f -p -c <sabit betik> tazele-swap <kurulu> <hazırlanan> <paket kimliği> <sürüm> <ekip> <CDHash>
+//    <kurulu kısa sürüm> <kurulu paket sürümü>`.
 //
 // Tehdit modeli: hazırlanan (staged) paket kullanıcının yazabildiği bir klasördedir; aynı kullanıcıyla
 // çalışan bir süreç, kullanıcı düzeyindeki doğrulamadan SONRA onu değiştirebilir (TOCTOU). Bu yüzden root
@@ -20,8 +21,12 @@ import Foundation
 //      kullanıcı düzeyinde doğrulanan paketinkiyle aynı olmalıdır (doğrulamadan sonra aynı ekibin başka bir
 //      paketi konsa bile yalnızca doğrulanan içerik kurulur); kurulu uygulamanın ekip ve paket kimliğini
 //      root olarak yeniden okur; sürüm, kullanıcı düzeyinde "daha yeni" bulunan sürümle aynı olmalıdır
-//      (eski sürüme dönme engeli). Herhangi biri tutmazsa kurulu uygulamaya dokunmadan sıfırdan farklı
-//      kodla çıkar,
+//      (eski sürüme dönme engeli). Değiştirmeden hemen önce kurulu uygulamanın
+//      `CFBundleShortVersionString` / `CFBundleVersion` değerleri, kullanıcı düzeyinde doğrulama sırasında
+//      gözlenenlerle aynı olmalıdır: araya başka bir güncelleyici girip daha yeni bir sürüm kurduysa, bizim
+//      (artık daha eski) sürümümüz onun üzerine yazılmaz (çıkış 18). Bu denetimde görülen kurulu paketin
+//      inode'u kritik bölümde yedeğe alınan paketinkiyle de aynı olmalıdır. Herhangi biri tutmazsa kurulu
+//      uygulamaya dokunmadan sıfırdan farklı kodla çıkar,
 //  (d) eski paketi root'a ait yedeğe, yenisini yerine `mv` ile (aynı birimde yeniden adlandırma) taşır;
 //      her taşıma inode karşılaştırmasıyla doğrulanır, böylece hedefe yarışla konmuş bir girdi (ör. sahte
 //      Info.plist'li bir klasör) başarı sayılmaz ve yedek silinmez; yerleştirme başarısızsa yedeği geri koyar,
@@ -75,6 +80,10 @@ enum RootSwap {
         /// Kullanıcı düzeyinde doğrulanan yeni paketin CDHash'i: root kopyası bununla aynı olmalı
         /// (doğrulamadan sonra başka bir paket konursa bile yalnızca doğrulanan içerik kurulur).
         let cdhash: String
+        /// Doğrulama sırasında kurulu uygulamada gözlenen `CFBundleShortVersionString` ve `CFBundleVersion`
+        /// (yoksa boş). Root betiği, değiştirmeden hemen önce bunların değişmediğini denetler.
+        let installedShortVersion: String
+        let installedVersion: String
 
         var appName: String { installed.deletingPathExtension().lastPathComponent }
     }
@@ -109,6 +118,11 @@ enum RootSwap {
         !s.isEmpty && !s.hasPrefix("-") && s.unicodeScalars.allSatisfy {
             $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "._+-".unicodeScalars.contains($0))
         }
+    }
+
+    /// Kurulu uygulamada gözlenen sürüm değeri: boş olabilir; değilse `^[A-Za-z0-9._ +()-]+$`, "-" ile başlamaz.
+    static func isObservedVersion(_ s: String) -> Bool {
+        s.isEmpty || (!s.hasPrefix("-") && PrivilegedCommand.isSafeArgument(s))
     }
 
     /// CDHash: 40-64 küçük harf onaltılık karakter.
@@ -192,14 +206,20 @@ enum RootSwap {
         guard isVersion(request.version) else { throw PrivilegeError.rejectedCommand(request.version) }
         guard isTeamID(request.team) else { throw PrivilegeError.rejectedCommand(request.team) }
         guard isCDHash(request.cdhash) else { throw PrivilegeError.rejectedCommand(request.cdhash) }
+        for observed in [request.installedShortVersion, request.installedVersion] where !isObservedVersion(observed) {
+            throw PrivilegeError.rejectedCommand(observed)
+        }
         return arguments(script: Script.production, installed: installed, staged: staged,
-                         bundleID: request.bundleID, version: request.version, team: request.team, cdhash: request.cdhash)
+                         bundleID: request.bundleID, version: request.version, team: request.team, cdhash: request.cdhash,
+                         installedShortVersion: request.installedShortVersion, installedVersion: request.installedVersion)
     }
 
-    /// `zsh -f -p -c <betik> tazele-swap $1…$6`. Veriler ayrı argümanlardır; tırnaklanmaz, birleştirilmez.
+    /// `zsh -f -p -c <betik> tazele-swap $1…$8`. Veriler ayrı argümanlardır; tırnaklanmaz, birleştirilmez.
     static func arguments(script: String, installed: String, staged: String, bundleID: String,
-                          version: String, team: String, cdhash: String) -> [String] {
-        [shell, "-f", "-p", "-c", script, "tazele-swap", installed, staged, bundleID, version, team, cdhash]
+                          version: String, team: String, cdhash: String,
+                          installedShortVersion: String, installedVersion: String) -> [String] {
+        [shell, "-f", "-p", "-c", script, "tazele-swap", installed, staged, bundleID, version, team, cdhash,
+         installedShortVersion, installedVersion]
     }
 
     /// Apple köklü, belirli ekibe ait imza gereksinimi (ekip önceden `isTeamID` ile doğrulanmalı).
@@ -226,9 +246,10 @@ enum RootSwap {
         """#
 
         /// Ortak gövde. `$1` kurulu yol, `$2` hazırlanan yol, `$3` paket kimliği, `$4` sürüm, `$5` ekip,
-        /// `$6` CDHash. Çıkış kodları: 0 başarı, 10 argüman, 11 root değil, 12 kopyalama, 13 kod imzası,
-        /// 14 ekip, 15 paket kimliği, 16 sürüm, 17 CDHash, 20 değiştirilemedi (eski sürüm yerinde),
-        /// 21 yedek korunuyor, 143 iptal.
+        /// `$6` CDHash, `$7` / `$8` kurulu uygulamada gözlenen kısa sürüm / paket sürümü (boş olabilir).
+        /// Çıkış kodları: 0 başarı, 10 argüman, 11 root değil, 12 kopyalama, 13 kod imzası, 14 ekip,
+        /// 15 paket kimliği, 16 sürüm, 17 CDHash, 18 kurulu uygulama doğrulamadan sonra değişti,
+        /// 20 değiştirilemedi (eski sürüm yerinde), 21 yedek korunuyor, 143 iptal.
         static let body = #"""
         LC_ALL=C; export LC_ALL
         PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
@@ -258,12 +279,12 @@ enum RootSwap {
         tz_dev() { /usr/bin/stat -f %d "$1" 2>/dev/null; }
         tz_bg() { "$@" & tz_child=$!; wait "$tz_child"; tz_rc=$?; tz_child=''; return "$tz_rc"; }
 
-        [ "$#" -eq 6 ] || tz_fail args 10
+        [ "$#" -eq 8 ] || tz_fail args 10
         [ "$(/usr/bin/id -u)" = "$tz_uid" ] || tz_fail notroot 11
-        tz_inst=$1; tz_staged=$2; tz_id=$3; tz_ver=$4; tz_team=$5; tz_cd=$6
+        tz_inst=$1; tz_staged=$2; tz_id=$3; tz_ver=$4; tz_team=$5; tz_cd=$6; tz_old_short=$7; tz_old_ver=$8
 
         # a) Argümanlar yeniden doğrulanır.
-        case "$tz_inst$tz_staged$tz_id$tz_ver$tz_team$tz_cd" in *[[:cntrl:]]*) tz_fail args 10 ;; esac
+        case "$tz_inst$tz_staged$tz_id$tz_ver$tz_team$tz_cd$tz_old_short$tz_old_ver" in *[[:cntrl:]]*) tz_fail args 10 ;; esac
         case "$tz_inst" in "$tz_apps"/*.app) ;; *) tz_fail args 10 ;; esac
         tz_name=${tz_inst#"$tz_apps"/}
         case "$tz_name" in */*|.*|-*|*..*|*[!A-Za-z0-9._\ +\(\)-]*) tz_fail args 10 ;; esac
@@ -272,6 +293,8 @@ enum RootSwap {
         case "$tz_id" in ''|-*|.*|*[!A-Za-z0-9._-]*) tz_fail args 10 ;; esac
         case "$tz_ver" in ''|-*|*[!A-Za-z0-9._+-]*) tz_fail args 10 ;; esac
         case "$tz_cd" in ''|*[!0-9a-f]*) tz_fail args 10 ;; esac
+        case "$tz_old_short" in -*|*[!A-Za-z0-9._\ +\(\)-]*) tz_fail args 10 ;; esac
+        case "$tz_old_ver" in -*|*[!A-Za-z0-9._\ +\(\)-]*) tz_fail args 10 ;; esac
         [ "${#tz_cd}" -ge 40 ] && [ "${#tz_cd}" -le 64 ] || tz_fail args 10
         tz_is_team "$tz_team" || tz_fail args 10
         [ -d "$tz_apps" ] && [ ! -L "$tz_apps" ] && [ "$(/bin/realpath "$tz_apps")" = "$tz_apps" ] || tz_fail args 10
@@ -309,6 +332,16 @@ enum RootSwap {
         [ "$(tz_plist "$tz_new" CFBundleIdentifier)" = "$tz_id" ] || tz_fail bundle 15
         [ "$(tz_plist "$tz_new" CFBundleVersion)" = "$tz_ver" ] || tz_fail version 16
 
+        # Kurulu uygulama, kullanıcı düzeyindeki doğrulamadan bu yana değişmemiş olmalı (araya başka bir
+        # güncelleme girdiyse eski sürümümüzü onun üzerine yazmayız). Görülen paketin inode'u, kritik
+        # bölümde yedeğe alınacak paketinkiyle aynı olmalı.
+        tz_hook before-changed
+        [ "$(tz_plist "$tz_inst" CFBundleShortVersionString)" = "$tz_old_short" ] || tz_fail changed 18
+        [ "$(tz_plist "$tz_inst" CFBundleVersion)" = "$tz_old_ver" ] || tz_fail changed 18
+        [ "$(tz_plist "$tz_inst" CFBundleIdentifier)" = "$tz_id" ] || tz_fail changed 18
+        tz_ino_seen=$(tz_ino "$tz_inst")
+        [ -n "$tz_ino_seen" ] || tz_fail changed 18
+
         # d) Yedekli değiştirme, ayrı bir alt kabukta: sarmalayıcı iptalde bu kabuğu önce TERM, 2 sn sonra
         # KILL ile durdurur; KILL yalnızca bu kabuğa gider, alt kabuk işini (gerekirse geri yüklemeyi) bitirir.
         # Her taşıma, inode karşılaştırmasıyla doğrulanır (hedefe yarışla konan başka bir girdi kabul edilmez).
@@ -317,6 +350,7 @@ enum RootSwap {
           tz_backup="$tz_work/backup/$tz_name"
           tz_ino_old=$(tz_ino "$tz_inst"); tz_ino_new=$(tz_ino "$tz_new")
           [ -n "$tz_ino_old" ] && [ -n "$tz_ino_new" ] || tz_fail swap 20
+          [ "$tz_ino_old" = "$tz_ino_seen" ] || tz_fail changed 18
           if ! /bin/mv "$tz_inst" "$tz_backup"; then
             if [ "$(tz_ino "$tz_inst")" = "$tz_ino_old" ] && [ ! -e "$tz_backup" ]; then tz_fail swap 20; fi
           fi
@@ -370,6 +404,10 @@ enum RootSwap {
               /usr/bin/codesign --verify --deep --strict "$1"
             }
             tz_hook() {
+              case "${TAZELE_TEST_HOOK:-}:$1" in
+                bump-installed:before-changed) /usr/bin/plutil -replace CFBundleVersion -string 99 "$tz_inst/Contents/Info.plist" ;;
+              esac
+              [ "$1" = after-backup ] || return 0
               case "${TAZELE_TEST_HOOK:-}" in
                 remove-new) /bin/rm -rf "$tz_new" ;;
                 block-target) : > "$tz_inst" ;;
@@ -388,6 +426,8 @@ enum RootSwap {
     /// Betiğin çıkış kodlarının anlamı.
     enum Outcome: Equatable, Sendable {
         case success, invalidArguments, notRoot, copyFailed, codeSignature, team, bundleID, version, codeHash
+        /// Kurulu uygulama, kullanıcı düzeyindeki doğrulamadan sonra değişti (ör. başka bir güncelleyici).
+        case installedChanged
         case restored, backupKept, cancelled, unknown(Int32)
 
         init(status: Int32) {
@@ -401,6 +441,7 @@ enum RootSwap {
             case 15: self = .bundleID
             case 16: self = .version
             case 17: self = .codeHash
+            case 18: self = .installedChanged
             case 20: self = .restored
             case 21: self = .backupKept
             case 143: self = .cancelled

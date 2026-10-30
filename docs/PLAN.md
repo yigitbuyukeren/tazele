@@ -28,8 +28,15 @@ Kullanıcının Node/Python ortamını bozmak, cask `auto_updates` çakışması
 Komut bayrakları (`softwareupdate`, `brew`, `pipx`, `uv`, `npm`) ve `SMAppService` davranışı macOS 26/27'de elle denenmeli.
 
 ## Durum (30 Ekim 2026)
-Yapıldı: Homebrew (formül, cask, kendi güncelleyen cask), App Store (`mas`, sudo parola penceresi), npm, rustup, RubyGems (sistem Ruby'si hariç), pipx/uv (PyPI), Oh My Zsh, Sparkle uygulamaları (appcast + Homebrew cask yedeği), macOS güncellemeleri (yeniden başlatma istemeyenler kurulabilir, diğerleri Sistem Ayarları). Arama, yoksay/sabitle, ayarlar (otomatik kontrol, bildirim, Dock rozeti, oturum açılışı), TR/EN arayüz.
+Yapıldı: Homebrew (formül, cask, kendi güncelleyen cask), App Store (`mas` ile tarama; yalnızca root'a ait, yazılamayan bir konumdaki `mas` ile kurulum, diğerlerinde App Store'a yönlendirme), npm, rustup, RubyGems (sistem Ruby'si hariç), pipx/uv (PyPI), Oh My Zsh, Sparkle uygulamaları (appcast + Homebrew cask yedeği), macOS güncellemeleri (yeniden başlatma istemeyenler kurulabilir, diğerleri Sistem Ayarları). Arama, yoksay/sabitle, ayarlar (otomatik kontrol, bildirim, Dock rozeti, oturum açılışı), TR/EN arayüz.
 
 Ayrıca: Sparkle uygulamalarını Tazele kendisi kurar (EdDSA imza doğrulama, kod imzası ve ekip kimliği kontrolü, geri alma); `.pkg` ile kurulanlar (WARP, Tailscale) satıcı beslemesiyle denetlenir; yönetici izni yerel yetki penceresiyle (Touch ID) istenir.
 
 Yapılmadı: Developer ID imzası ve notarization; yetki penceresi, gerçek Sparkle kurulumu ve DMG çıkarma gerçek bir uygulamada denenmedi.
+
+
+## Güvenlik sınırları
+- Yönetici yetkisiyle yalnızca güvenilir konumdaki, root'a ait araçlar ve doğrulanmış argümanlar çalıştırılır. Güvenilir `mas` yoksa App Store'dan güncelleme yapılır.
+- Sparkle arşivi imza, dosya kimliği ve özetle denetlenir; ZIP ve tar içeriği diske çıkarılmadan akışla boyut sınırına tabi tutulur; ZIP verisinin sağlama toplamı da sınanır. Disk görüntüsündeki uygulama kopyalanmadan önce denetlenir. Açılan paket kod imzası ve ekip kimliğiyle doğrulanır. Root sahipli uygulamalarda root'a ait kopya ayrıca doğrulanır.
+- Aynı kullanıcıyla çalışan başka bir süreç, arşivi veya parola yardımcısını son kontrolden sonra değiştirebilir. Bu yarışlar tamamen giderilmedi; gerçek yetkili kurulum ve bağımsız güvenlik incelemesi tamamlanmadan güvenlik doğrulaması tamamlanmış sayılmaz.
+- Akış ve cask listesi istekleri HTTPS kullanır ve boyut sınırına tabidir.

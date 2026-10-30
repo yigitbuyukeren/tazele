@@ -33,7 +33,8 @@ public struct OutdatedItem: Identifiable, Hashable, Sendable {
     public let caskToken: String?
     /// Paket yöneticisi: pythonTools için "pipx" veya "uv"; system için softwareupdate etiketi.
     public let manager: String?
-    /// macOS güncellemesi Tazele'den kurulabilir mi (yeniden başlatma istemiyor).
+    /// macOS güncellemesi Tazele'den kurulabilir mi (yeniden başlatma istemiyor). App Store öğelerinde:
+    /// root olarak çalıştırılabilecek güvenilir bir `mas` var mı (yoksa App Store'un kendisinden güncellenir).
     public let installable: Bool
     /// Sparkle uygulamasının indirme ve imza bilgisi (Tazele'nin kendisi kurabilsin diye). Diğer kaynaklarda nil.
     public let download: SparkleDownload?
@@ -90,5 +91,11 @@ extension OutdatedItem {
     public func withCaskToken(_ token: String?) -> OutdatedItem {
         OutdatedItem(source: source, name: name, installed: installed, latest: latest, appID: appID,
                      path: path, caskToken: token, manager: manager, installable: installable, download: download)
+    }
+
+    /// Aynı öğeyi, verilen kurulabilirlikle döndürür.
+    public func withInstallable(_ value: Bool) -> OutdatedItem {
+        OutdatedItem(source: source, name: name, installed: installed, latest: latest, appID: appID,
+                     path: path, caskToken: caskToken, manager: manager, installable: value, download: download)
     }
 }

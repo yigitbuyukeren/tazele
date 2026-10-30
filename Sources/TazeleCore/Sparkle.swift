@@ -143,13 +143,19 @@ public enum Sparkle {
         s.split(separator: " ").first.map(String.init) ?? s
     }
 
+    /// Appcast'i indirir: yalnızca https (her yönlendirme adımı dahil), en fazla 10 MB, sınırlı süre.
+    /// http besleme adresleri hiç istenmez; hata ya da sınır aşımında boş liste döner.
     public static func fetch(_ url: URL) async -> [AppcastItem] {
-        var request = URLRequest(url: url, timeoutInterval: 15)
-        request.setValue("Tazele", forHTTPHeaderField: "User-Agent")
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200 else { return [] }
-        // Yönlendirme olduysa göreli adresler son adrese göre çözülür.
-        return parseAppcast(data, baseURL: response.url ?? url)
+        await fetch(url, configuration: .ephemeral)
+    }
+
+    static func fetch(_ url: URL, configuration: URLSessionConfiguration) async -> [AppcastItem] {
+        guard let (data, finalURL) = try? await BoundedFetch.data(from: url, maxBytes: BoundedFetch.feedLimit,
+                                                                   requestTimeout: 15, resourceTimeout: 30,
+                                                                   configuration: configuration)
+        else { return [] }
+        // Göreli adresler yalnızca son (https olduğu doğrulanmış) adrese göre çözülür.
+        return parseAppcast(data, baseURL: finalURL)
     }
 }
 

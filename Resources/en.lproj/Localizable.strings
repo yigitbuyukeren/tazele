@@ -112,3 +112,10 @@
 "Yönetici olarak yeniden denetleniyor (kod imzası, ekip, paket kimliği, sürüm)" = "Re-checking as administrator (code signature, team, bundle ID, version)";
 "Yönetici izni isteniyor: %@" = "Requesting administrator permission: %@";
 "Uygulama yerinde bulunamadı; yönetici olarak değiştirme yarıda kalmış olabilir" = "App not found in place; the administrator swap may have been interrupted";
+"mas kullanıcının değiştirebildiği bir konumda (ör. Homebrew); güvenlik için yönetici olarak çalıştırılmaz. Güncellemeyi App Store'dan yükle." = "mas is in a user-writable location (e.g. Homebrew) and cannot run as administrator safely. Install the update from the App Store.";
+"Geçersiz paket adı atlandı: %@" = "Invalid package name skipped: %@";
+"App Store güncellemeleri atlandı: mas yönetici olarak güvenle çalıştırılamıyor; App Store'dan güncelle." = "App Store updates skipped: mas cannot safely run as administrator. Update from the App Store.";
+"Araç yönetici olarak çalıştırılmadı; kullanıcının değiştirebildiği bir konumda: %@" = "Tool not run as administrator because its location is user-writable: %@";
+"Arşiv imza doğrulamasından sonra değişti; kurulum durduruldu" = "The archive changed after signature verification; installation stopped";
+"Arşiv güvenli değil (dışarıya yazan yol, bağ, özel dosya ya da aşırı boyut)" = "Unsafe archive (escaping path, link, special file, or excessive size)";
+"Kurulu uygulama taramadan sonra değişti; yeniden tarayıp dene" = "The installed app changed after scanning; scan again and retry";

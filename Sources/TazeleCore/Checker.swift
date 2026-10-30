@@ -40,7 +40,10 @@ public enum Checker {
             let r = try await runner.run(["mas", "outdated"], timeout: 90)
             guard !r.timedOut else { throw CheckError.timedOut }
             guard r.status == 0 else { throw CheckError.failed(r.text) }
-            return Parsers.mas(r.text)
+            // `mas update` root ister; yalnızca root'a ait, kullanıcının değiştiremeyeceği bir `mas` varsa
+            // Tazele'den kurulabilir. Homebrew'ün kullanıcıya ait `mas`'ı ile App Store'un kendisi açılır.
+            let trusted = PrivilegedCommand.trustedTool("mas", searchPath: searchPath) != nil
+            return Parsers.mas(r.text).map { $0.withInstallable(trusted) }
         } }
         if installed.contains("npm") { await collect("npm", into: &report) {
             let r = try await runner.run(["npm", "outdated", "-g", "--json"], timeout: 90)
@@ -139,44 +142,131 @@ public enum UpdateStep: Sendable {
     }
 }
 
+/// Güncelleme planı: sıralı adımlar ve atlanan öğeler için günlük satırları.
+public struct UpdatePlan: Sendable {
+    public var steps: [UpdateStep] = []
+    /// Neden atlandığını anlatan tek satırlık açıklamalar (geçersiz paket adı, güvenilmeyen `mas`).
+    public var skipped: [String] = []
+}
+
+/// Araç çıktısından gelen paket adları komut satırına argüman olarak geçer. Tutucu bir dilbilgisine
+/// uymayan ad (ör. "-" ile başlayan, seçenek gibi yorumlanabilecek) adım dışında bırakılır.
+public enum PackageName {
+    /// Harf/rakamla başlayan, `[A-Za-z0-9@._+-]` karakterlerinden oluşan parça.
+    static func isBrewSegment(_ s: Substring) -> Bool {
+        guard let first = s.unicodeScalars.first, isAlnum(first) else { return false }
+        return s.unicodeScalars.allSatisfy { isAlnum($0) || "@._+-".unicodeScalars.contains($0) }
+    }
+
+    /// Homebrew formül/cask adı; tap'li biçim (`kullanıcı/tap/ad`) en fazla üç parça.
+    public static func isBrew(_ s: String) -> Bool {
+        let parts = s.split(separator: "/", omittingEmptySubsequences: false)
+        return (1...3).contains(parts.count) && parts.allSatisfy(isBrewSegment)
+    }
+
+    /// npm: `^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$`
+    public static func isNpm(_ s: String) -> Bool {
+        func part(_ p: Substring) -> Bool {
+            guard let first = p.unicodeScalars.first, isLowerAlnum(first) else { return false }
+            return p.unicodeScalars.allSatisfy { isLowerAlnum($0) || "._-".unicodeScalars.contains($0) }
+        }
+        if s.hasPrefix("@") {
+            let parts = s.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
+            return parts.count == 2 && part(parts[0]) && part(parts[1])
+        }
+        return part(Substring(s))
+    }
+
+    /// RubyGems: harf/rakamla başlayan `[A-Za-z0-9._-]`.
+    public static func isGem(_ s: String) -> Bool {
+        guard let first = s.unicodeScalars.first, isAlnum(first) else { return false }
+        return s.unicodeScalars.allSatisfy { isAlnum($0) || "._-".unicodeScalars.contains($0) }
+    }
+
+    /// Python paket adı (PEP 508): harf/rakamla başlar ve biter, arada `[A-Za-z0-9._-]`.
+    public static func isPython(_ s: String) -> Bool {
+        guard let first = s.unicodeScalars.first, let last = s.unicodeScalars.last, isAlnum(first), isAlnum(last) else { return false }
+        return s.unicodeScalars.allSatisfy { isAlnum($0) || "._-".unicodeScalars.contains($0) }
+    }
+
+    private static func isAlnum(_ c: Unicode.Scalar) -> Bool {
+        c.isASCII && (("a"..."z").contains(c) || ("A"..."Z").contains(c) || ("0"..."9").contains(c))
+    }
+
+    private static func isLowerAlnum(_ c: Unicode.Scalar) -> Bool {
+        c.isASCII && (("a"..."z").contains(c) || ("0"..."9").contains(c))
+    }
+}
+
 public enum Updater {
     /// Seçili öğeler için sıralı güncelleme adımları (kaynağa göre gruplanmış).
-    public static func steps(for items: [OutdatedItem]) -> [UpdateStep] {
-        func names(_ k: SourceKind) -> [String] { items.filter { $0.source == k }.map(\.name) }
-        var steps: [UpdateStep] = []
-        func add(_ c: [String]) { steps.append(.command(c)) }
-        if !names(.homebrewFormula).isEmpty { add(["brew", "upgrade", "--formula"] + names(.homebrewFormula)) }
-        if !names(.homebrewCask).isEmpty { add(["brew", "upgrade", "--cask"] + names(.homebrewCask)) }
-        if !names(.selfUpdatingCask).isEmpty { add(["brew", "upgrade", "--cask", "--greedy"] + names(.selfUpdatingCask)) }
+    public static func steps(for items: [OutdatedItem]) -> [UpdateStep] { plan(for: items).steps }
+
+    /// Seçili öğeler için plan. `masPath`: root olarak çalıştırılabilecek güvenilir `mas` (yoksa App Store
+    /// öğeleri atlanır ve kullanıcı App Store'a yönlendirilir).
+    /// Ad argümanlarından önce, aracın desteklediği yerde `--` konur (brew, npm, gem: kaynak koduyla doğrulandı).
+    public static func plan(for items: [OutdatedItem],
+                            masPath: @autoclosure () -> String? = PrivilegedCommand.trustedTool("mas")) -> UpdatePlan {
+        var plan = UpdatePlan()
+        func skip(_ name: String) {
+            plan.skipped.append(String(localized: "Geçersiz paket adı atlandı: \(name)", bundle: .main))
+        }
+        func names(_ k: SourceKind, _ isValid: (String) -> Bool) -> [String] {
+            items.filter { $0.source == k }.map(\.name).filter { name in
+                if isValid(name) { return true }
+                skip(name)
+                return false
+            }
+        }
+        func add(_ c: [String]) { plan.steps.append(.command(c)) }
+        let formulae = names(.homebrewFormula, PackageName.isBrew)
+        if !formulae.isEmpty { add(["brew", "upgrade", "--formula", "--"] + formulae) }
+        let casks = names(.homebrewCask, PackageName.isBrew)
+        if !casks.isEmpty { add(["brew", "upgrade", "--cask", "--"] + casks) }
+        let greedy = names(.selfUpdatingCask, PackageName.isBrew)
+        if !greedy.isEmpty { add(["brew", "upgrade", "--cask", "--greedy", "--"] + greedy) }
         let appIDs = items.filter { $0.source == .appStore }.compactMap(\.appID)
         if !appIDs.isEmpty {
-            // `mas update` root ister; seçilen kimlikler tek tek geçilir.
-            steps.append(.privileged([Privilege.locate("mas") ?? "mas", "update"] + appIDs))
+            // `mas update` root ister; seçilen kimlikler tek tek geçilir (sayısal oldukları `validate`'te denetlenir).
+            if let mas = masPath() {
+                plan.steps.append(.privileged([mas, "update"] + appIDs))
+            } else {
+                plan.skipped.append(String(localized: "App Store güncellemeleri atlandı: mas yönetici olarak güvenle çalıştırılamıyor; App Store'dan güncelle.", bundle: .main))
+            }
         }
-        if !names(.npm).isEmpty { add(["npm", "update", "-g"] + names(.npm)) }
-        if !names(.rustup).isEmpty { add(["rustup", "update"]) }
-        if !names(.gem).isEmpty { add(["gem", "update"] + names(.gem)) }
+        let npm = names(.npm, PackageName.isNpm)
+        if !npm.isEmpty { add(["npm", "update", "-g", "--"] + npm) }
+        if items.contains(where: { $0.source == .rustup }) { add(["rustup", "update"]) }
+        let gems = names(.gem, PackageName.isGem)
+        if !gems.isEmpty { add(["gem", "update", "--"] + gems) }
         for item in items where item.source == .pythonTools {
+            // pipx / uv için `--` doğrulanmadı; ad dilbilgisi "-" ile başlamayı zaten engeller.
+            guard PackageName.isPython(item.name) else { skip(item.name); continue }
             add(item.manager == "uv" ? ["uv", "tool", "upgrade", item.name] : ["pipx", "upgrade", item.name])
         }
-        if !names(.ohMyZsh).isEmpty {
+        if items.contains(where: { $0.source == .ohMyZsh }) {
             add(["sh", "-c", "ZSH=\"${ZSH:-$HOME/.oh-my-zsh}\" \"$ZSH/tools/upgrade.sh\""])
         }
-        // Yeniden başlatma istemeyen macOS güncellemeleri (ör. Command Line Tools).
+        // Yeniden başlatma istemeyen macOS güncellemeleri (ör. Command Line Tools). Etiket `validate`'te denetlenir.
         for item in items where item.source == .system && item.installable {
-            steps.append(.privileged(["softwareupdate", "-i", item.manager ?? item.name]))
+            plan.steps.append(.privileged(["softwareupdate", "-i", item.manager ?? item.name]))
         }
         // Sparkle uygulamaları: cask'i varsa Homebrew ile, yoksa Tazele kendisi kurar.
         let sparkle = items.filter { $0.source == .sparkle }
-        let casks = sparkle.compactMap(\.caskToken)
-        if !casks.isEmpty { add(["brew", "upgrade", "--cask", "--greedy"] + casks) }
-        for item in sparkle where item.caskToken == nil && SparkleInstaller.canInstall(item) { steps.append(.sparkle(item)) }
-        return steps
+        let tokens = sparkle.compactMap(\.caskToken).filter { token in
+            if PackageName.isBrew(token) { return true }
+            skip(token)
+            return false
+        }
+        if !tokens.isEmpty { add(["brew", "upgrade", "--cask", "--greedy", "--"] + tokens) }
+        for item in sparkle where item.caskToken == nil && SparkleInstaller.canInstall(item) { plan.steps.append(.sparkle(item)) }
+        return plan
     }
 
     /// Yalnızca komut tabanlı adımlar (root isteyenlerin başına `sudo -A` eklenir). Testler ve günlük için.
-    public static func commands(for items: [OutdatedItem]) -> [[String]] {
-        steps(for: items).compactMap {
+    public static func commands(for items: [OutdatedItem],
+                                masPath: @autoclosure () -> String? = PrivilegedCommand.trustedTool("mas")) -> [[String]] {
+        plan(for: items, masPath: masPath()).steps.compactMap {
             switch $0 {
             case .command(let c): c
             case .privileged(let c): ["sudo", "-A"] + c

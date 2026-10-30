@@ -347,6 +347,19 @@ struct ContentView: View {
                     .help("Uygulamayı aç; güncellemeyi kendi güncelleyicisinden yükle")
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
+        } else if item.source == .appStore {
+            // Güvenilir (root'a ait) bir `mas` yok: Tazele yönetici olarak çalıştırmaz, App Store'u açar.
+            HStack(spacing: 10) {
+                Text(item.name).font(.system(size: 12.5)).lineLimit(1)
+                Spacer(minLength: 8)
+                if !item.latest.isEmpty { VersionPill(installed: item.installed, latest: item.latest) }
+                Button {
+                    if let url = URL(string: "macappstore://showUpdatesPage") { NSWorkspace.shared.open(url) }
+                } label: { Label("App Store", systemImage: "arrow.up.forward.app").font(.system(size: 11.5)) }
+                    .buttonStyle(.link)
+                    .help("mas kullanıcının değiştirebildiği bir konumda (ör. Homebrew); güvenlik için yönetici olarak çalıştırılmaz. Güncellemeyi App Store'dan yükle.")
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
         } else {
             // Yeniden başlatma isteyen macOS güncellemeleri Sistem Ayarları'ndan yüklenir.
             HStack(spacing: 8) {

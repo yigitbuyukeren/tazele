@@ -141,16 +141,12 @@ public enum SparkleFallback {
         return nil
     }
 
-    static func download(_ url: URL) async -> Data? {
-        var request = URLRequest(url: url, timeoutInterval: 20)
-        request.setValue("Tazele", forHTTPHeaderField: "User-Agent")
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 20
-        config.timeoutIntervalForResource = 20
-        let session = URLSession(configuration: config)
-        defer { session.finishTasksAndInvalidate() }
-        guard let (data, response) = try? await session.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty else { return nil }
+    /// Yalnızca https (her yönlendirme adımı dahil), en fazla 64 MB, sınırlı süre; aksi halde nil.
+    static func download(_ url: URL, configuration: URLSessionConfiguration = .ephemeral) async -> Data? {
+        guard let (data, _) = try? await BoundedFetch.data(from: url, maxBytes: BoundedFetch.caskIndexLimit,
+                                                            requestTimeout: 20, resourceTimeout: 120,
+                                                            configuration: configuration),
+              !data.isEmpty else { return nil }
         return data
     }
 

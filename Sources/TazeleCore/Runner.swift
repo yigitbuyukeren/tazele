@@ -31,6 +31,12 @@ public enum ShellEnvironment {
         return line.dropFirst("__TAZELE_PATH__".count).split(separator: ":").map(String.init)
     }
 
+    /// Bilinen kalan risk: bu PATH'teki kullanıcı klasörleri (Homebrew, ~/.local/bin, giriş kabuğundan gelenler)
+    /// sistem klasörlerinden önce gelir ve giriş kabuğu okunurken kullanıcının başlangıç dosyaları çalışır.
+    /// Aynı kullanıcıyla çalışan bir süreç buralara bir `brew`/`npm`/`sh` koyarak kullanıcı yetkisiyle kod
+    /// çalıştırabilir; bu, kullanıcının kendi terminalindeki durumla aynıdır ve yetki yükseltmez. Root olarak
+    /// çalışan hiçbir şey bu PATH'e güvenmez: araçlar `PrivilegedCommand.trustedTool` ile yalnızca root'a ait
+    /// konumlardan seçilir, root sarmalayıcıları PATH'i sistem klasörlerine sıfırlar.
     public static func make() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let home = NSHomeDirectory()
@@ -45,7 +51,10 @@ public enum ShellEnvironment {
         env["MAS_NO_AUTO_INDEX"] = "1"
         env["NONINTERACTIVE"] = "1"
         env["CI"] = "1"
-        // Terminalsiz ortamda sudo / brew parolayı bu pencereden sorar.
+        // Terminalsiz ortamda sudo / brew parolayı bu pencereden sorar. Betik burada, yani her komut
+        // başlatılmadan hemen önce, bütünlüğü için yeniden denetlenir (bkz. `Privilege.installAskpass`).
+        // Kurulum başarısız olsa bile devralınmış bir askpass yolunu kullanma.
+        env.removeValue(forKey: "SUDO_ASKPASS")
         if let askpass = try? Privilege.installAskpass() { env["SUDO_ASKPASS"] = askpass.path }
         return env
     }

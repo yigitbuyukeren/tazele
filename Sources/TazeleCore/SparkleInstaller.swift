@@ -21,6 +21,12 @@ public enum SparkleInstallError: Error, LocalizedError, Equatable {
     case swapFailed
     case volumeAccessDenied
     case cancelled
+    /// Arşiv, imza doğrulamasından sonra (açılmadan önce) değişti.
+    case archiveChanged
+    /// Arşiv dışarıya yazan yol, dışarıyı gösteren bağ, özel dosya ya da aşırı boyut içeriyor.
+    case unsafeArchive
+    /// Kurulu uygulama taramadan / doğrulamadan sonra değişti (ör. kendi kendini güncelledi).
+    case installedChanged
 
     public var errorDescription: String? {
         switch self {
@@ -42,6 +48,9 @@ public enum SparkleInstallError: Error, LocalizedError, Equatable {
         case .volumeAccessDenied:
             String(localized: "Disk görüntüsü okunamadı; Sistem Ayarları > Gizlilik ve Güvenlik > Dosyalar ve Klasörler'de Tazele'ye çıkarılabilir birimler izni ver", bundle: .main)
         case .cancelled: String(localized: "Kurulum iptal edildi", bundle: .main)
+        case .archiveChanged: String(localized: "Arşiv imza doğrulamasından sonra değişti; kurulum durduruldu", bundle: .main)
+        case .unsafeArchive: String(localized: "Arşiv güvenli değil (dışarıya yazan yol, bağ, özel dosya ya da aşırı boyut)", bundle: .main)
+        case .installedChanged: String(localized: "Kurulu uygulama taramadan sonra değişti; yeniden tarayıp dene", bundle: .main)
         }
     }
 }
@@ -212,11 +221,8 @@ public enum SparkleInstaller {
         return k.isValidSignature(sig, for: data)
     }
 
-    static func verifyEdSignature(ofFile url: URL, signature: String, publicKey key: String) -> Bool {
-        // Büyük dosyalar belleğe kopyalanmadan eşlenir.
-        guard let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return false }
-        return verifyEdSignature(of: data, signature: signature, publicKey: key)
-    }
+    /// Dosya için doğrulama `ArchiveGuard.verify` ile yapılır: imza ve SHA-256 aynı eşlenmiş baytlar üzerinde
+    /// hesaplanır, böylece açılacak dosya doğrulanan baytlara bağlanabilir (bkz. ArchiveSafety.swift).
 
     // MARK: - Sürüm ve imza bilgisi
 
@@ -297,6 +303,9 @@ public enum SparkleInstaller {
               let itemKey = d.publicEDKey?.filter({ !$0.isWhitespace }), installedKey == itemKey
         else { throw SparkleInstallError.keyMismatch }
         let installedVersion = installedInfo["CFBundleVersion"] as? String ?? ""
+        let installedShort = installedInfo["CFBundleShortVersionString"] as? String ?? ""
+        // Taramada görülen sürüm hâlâ kurulu mu? (Uygulama bu arada kendini güncellediyse eski bilgiyle kurulmaz.)
+        guard VersionCompare.compare(item.installed, installedShort) == .orderedSame else { throw SparkleInstallError.installedChanged }
         let appName = appURL.deletingPathExtension().lastPathComponent
         // Yönetici yolu mu? (Kurulabilirlik zaten denetlendi: yazılamıyorsa doğrudan /Applications'ta ve ekip imzalı.)
         let administrator = !isUserWritable(appURL, probe: probe)
@@ -314,11 +323,13 @@ public enum SparkleInstaller {
         let size = ((try? fm.attributesOfItem(atPath: archive.path)[.size]) as? NSNumber)?.int64Value ?? -1
         guard size > 0, size <= maxDownloadBytes else { try? fm.removeItem(at: archive); throw SparkleInstallError.tooLarge }
         if let expected = d.length, expected != size { try? fm.removeItem(at: archive); throw SparkleInstallError.sizeMismatch }
+        // Çalışma klasörü yalnızca sahibine açık (0700), arşiv salt okunur (0400): doğrulamadan önce.
+        try ArchiveGuard.restrict(workDirectory: work, archive: archive)
 
-        // b) EdDSA imzası
+        // b) EdDSA imzası; aynı baytların SHA-256'sı ve dosya kimliği açmadan hemen önce yeniden denetlenir.
         try Task.checkCancellation()
         onLine(String(localized: "EdDSA imzası doğrulanıyor", bundle: .main))
-        guard verifyEdSignature(ofFile: archive, signature: sig, publicKey: installedKey) else {
+        guard let fingerprint = ArchiveGuard.verify(file: archive, signature: sig, publicKey: installedKey) else {
             try? fm.removeItem(at: archive)
             throw SparkleInstallError.signatureInvalid
         }
@@ -329,7 +340,7 @@ public enum SparkleInstaller {
         onLine(String(localized: "Arşiv açılıyor", bundle: .main))
         let extractDir = work.appendingPathComponent("extracted", isDirectory: true)
         try fm.createDirectory(at: extractDir, withIntermediateDirectories: true)
-        let newApp = try await extract(archive, kind: kind, appName: appName, into: extractDir, work: work)
+        let newApp = try await extract(archive, kind: kind, fingerprint: fingerprint, appName: appName, into: extractDir, work: work)
         try? fm.removeItem(at: archive)
 
         // d) Yeni paketin denetimi
@@ -339,8 +350,7 @@ public enum SparkleInstaller {
         else { throw SparkleInstallError.bundleMismatch }
         let newVersion = newInfo["CFBundleVersion"] as? String ?? ""
         guard isNewer(newVersion, than: installedVersion) else { throw SparkleInstallError.notNewer }
-        let verify = try await Tool.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", newApp.path], timeout: 300)
-        guard verify.status == 0 else { throw SparkleInstallError.codeSignatureInvalid }
+        guard try await verifyCodeSignature(newApp) else { throw SparkleInstallError.codeSignatureInvalid }
         let installedTeam = await env.codeTeam(appURL)
         if let installedTeam {
             guard await env.codeTeam(newApp) == installedTeam else { throw SparkleInstallError.teamMismatch }
@@ -357,12 +367,10 @@ public enum SparkleInstaller {
             let newKey = (newInfo["SUPublicEDKey"] as? String)?.filter { !$0.isWhitespace }
             guard newKey == installedKey else { throw SparkleInstallError.keyMismatch }
         }
-        // Yönetici yolunda root kopyası, burada doğrulanan içeriğe CDHash ile bağlanır.
-        var verifiedHash: String?
-        if administrator {
-            guard let hash = await env.codeHash(newApp), RootSwap.isCDHash(hash) else { throw SparkleInstallError.codeSignatureInvalid }
-            verifiedHash = hash
-        }
+        // Doğrulanan paket CDHash ile kaydedilir: yönetici yolunda root kopyası, kullanıcı yolunda yerleştirilen
+        // paket buna bağlanır (doğrulamadan sonra başka bir paket konursa kurulmaz).
+        guard let verifiedHash = await env.codeHash(newApp), RootSwap.isCDHash(verifiedHash)
+        else { throw SparkleInstallError.codeSignatureInvalid }
 
         // e) Çalışıyorsa kibarca kapatma
         try Task.checkCancellation()
@@ -373,20 +381,39 @@ public enum SparkleInstaller {
         }
         // Bu noktadan sonra iptal edilmez: değiştirme kısa ve geri alınabilir olmalı.
 
-        if administrator, let installedTeam, let verifiedHash {
+        // Kurulu uygulama doğrulamanın başından beri değişmedi mi (kimlik ve iki sürüm değeri)?
+        func requireInstalledUnchanged() async throws {
+            guard isUnchanged(appURL, bundleID: d.bundleID, version: installedVersion, shortVersion: installedShort) else {
+                if wasRunning { _ = await env.relaunch(appURL) }
+                throw SparkleInstallError.installedChanged
+            }
+        }
+
+        if administrator, let installedTeam {
             // Yönetici yolu: izin penceresi ancak şimdi, tüm doğrulamalardan sonra açılır. İptal, root betiği
             // kritik bölüme (yedek + yerleştirme) girene kadar işler; o bölüm yarıda kesilmez.
             // Kurulu yol, kurulabilirlik denetiminin tam olarak onayladığı ham yoldur (standartlaştırılmaz).
+            // Gözlenen kurulu sürüm root betiğine de geçer: değiştirmeden hemen önce root olarak yeniden denetlenir.
+            try await requireInstalledUnchanged()
             try await swapAsAdministrator(
                 RootSwap.Request(installed: URL(fileURLWithPath: path), staged: newApp, workDirectory: work, bundleID: d.bundleID,
-                                 version: newVersion, team: installedTeam, cdhash: verifiedHash),
+                                 version: newVersion, team: installedTeam, cdhash: verifiedHash,
+                                 installedShortVersion: installedShort, installedVersion: installedVersion),
                 appName: appName, wasRunning: wasRunning, onLine: onLine, env: env)
             let shown = newInfo["CFBundleShortVersionString"] as? String ?? newVersion
             onLine(String(localized: "\(appName) güncellendi: \(shown)", bundle: .main))
             return
         }
 
-        // f) Yedekli değiştirme
+        // f) Yedekli değiştirme. Hemen önce: kurulu uygulama değişmedi ve hazırlanan paket hâlâ doğrulanan paket
+        // (CDHash). Yerleştirildikten sonra kod imzası ve CDHash yerinde yeniden denetlenir; tutmazsa geri alınır.
+        // Kalan risk: aynı kullanıcıyla çalışan bir süreç kullanıcının yazabildiği bu klasörlere her an
+        // dokunabilir; bu denetimler yarışı daraltır ve kurulan nesneyi doğrulanan koda bağlar.
+        try await requireInstalledUnchanged()
+        guard await env.codeHash(newApp) == verifiedHash else {
+            if wasRunning { _ = await env.relaunch(appURL) }
+            throw SparkleInstallError.codeSignatureInvalid
+        }
         onLine(String(localized: "Uygulama değiştiriliyor", bundle: .main))
         let backupDir = work.appendingPathComponent("backup", isDirectory: true)
         let backup = backupDir.appendingPathComponent(appURL.lastPathComponent)
@@ -402,7 +429,9 @@ public enum SparkleInstaller {
             try fm.moveItem(at: newApp, to: appURL)
             swapped = true
             guard let placed = bundleInfo(appURL), placed["CFBundleIdentifier"] as? String == d.bundleID,
-                  placed["CFBundleVersion"] as? String == newVersion else { throw SparkleInstallError.swapFailed }
+                  placed["CFBundleVersion"] as? String == newVersion,
+                  try await verifyCodeSignature(appURL, cancellable: false), await env.codeHash(appURL) == verifiedHash
+            else { throw SparkleInstallError.swapFailed }
         } catch {
             // Geri yükleme: yeni paketi kenara al, yedeği yerine koy.
             if swapped { try? fm.moveItem(at: appURL, to: work.appendingPathComponent("failed-\(appURL.lastPathComponent)")) }
@@ -460,6 +489,7 @@ public enum SparkleInstaller {
         case .codeSignature, .codeHash: throw SparkleInstallError.codeSignatureInvalid
         case .team: throw SparkleInstallError.teamMismatch
         case .bundleID, .version: throw SparkleInstallError.bundleMismatch
+        case .installedChanged: throw SparkleInstallError.installedChanged
         case .cancelled: throw SparkleInstallError.cancelled
         default:
             if bundleInfo(appURL) == nil {
@@ -467,6 +497,20 @@ public enum SparkleInstaller {
             }
             throw SparkleInstallError.swapFailed
         }
+    }
+
+    /// `codesign --verify --deep --strict`.
+    static func verifyCodeSignature(_ app: URL, cancellable: Bool = true) async throws -> Bool {
+        try await Tool.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path], timeout: 300,
+                           cancellable: cancellable).status == 0
+    }
+
+    /// Kurulu uygulamanın kimliği ve iki sürüm değeri beklenenle aynı mı?
+    static func isUnchanged(_ app: URL, bundleID: String, version: String, shortVersion: String) -> Bool {
+        guard let info = bundleInfo(app) else { return false }
+        return info["CFBundleIdentifier"] as? String == bundleID
+            && (info["CFBundleVersion"] as? String ?? "") == version
+            && (info["CFBundleShortVersionString"] as? String ?? "") == shortVersion
     }
 
     /// `codesign --verify --deep --strict` + Apple köklü, belirtilen ekibe ait imza gereksinimi.
@@ -478,7 +522,9 @@ public enum SparkleInstaller {
     }
 
     static func cdhash(of app: URL) async -> String? {
-        guard let r = try? await Tool.run("/usr/bin/codesign", ["-dv", "--verbose=4", app.path], timeout: 120) else { return nil }
+        // İptal edilmez: değiştirmenin hemen öncesinde ve sonrasında da kullanılır (kısa sürer).
+        guard let r = try? await Tool.run("/usr/bin/codesign", ["-dv", "--verbose=4", app.path], timeout: 120, cancellable: false)
+        else { return nil }
         return RootSwap.cdhash(fromCodesignOutput: String(decoding: r.stderr + r.stdout, as: UTF8.self))
     }
 
@@ -493,21 +539,40 @@ public enum SparkleInstaller {
 
     // MARK: - Arşivi açma
 
-    private static func extract(_ archive: URL, kind: ArchiveKind, appName: String, into dir: URL, work: URL) async throws -> URL {
+    /// Yalnızca doğrulanan dosyadan açar: her araç çağrısından hemen önce dosyanın kimliği ve SHA-256'sı
+    /// doğrulanan parmak iziyle karşılaştırılır. Açılan ağaç `ArchiveGuard.checkTree` ile denetlenir.
+    private static func extract(_ archive: URL, kind: ArchiveKind, fingerprint: ArchiveFingerprint, appName: String,
+                                into dir: URL, work: URL) async throws -> URL {
+        func requireVerifiedBytes() throws {
+            guard ArchiveGuard.matches(fingerprint, file: archive) else { throw SparkleInstallError.archiveChanged }
+        }
         switch kind {
         case .zip:
+            try ArchiveGuard.checkZip(archive)
+            try requireVerifiedBytes()
+            // Başlıktaki boyut yalan söyleyebilir; bsdtar veri akışını diske yazmadan açar ve
+            // gerçek boyut/sağlama toplamını denetler. `ditto` tek başına bu uyuşmazlığı kabul eder.
+            try await verifyArchivePayload(archive)
+            try requireVerifiedBytes()
             let r = try await Tool.run("/usr/bin/ditto", ["-x", "-k", archive.path, dir.path], timeout: 900)
             guard r.status == 0 else { throw SparkleInstallError.extractFailed }
+            try ArchiveGuard.checkTree(dir)
             return try findApp(named: appName, in: dir)
         case .tar:
+            // bsdtar varsayılan olarak ".." içeren ve bağın içinden geçen girdileri reddeder, baştaki "/" işaretini atar.
+            try requireVerifiedBytes()
+            try await verifyArchivePayload(archive)
+            try requireVerifiedBytes()
             let r = try await Tool.run("/usr/bin/tar", ["-xf", archive.path, "-C", dir.path], timeout: 900)
             guard r.status == 0 else { throw SparkleInstallError.extractFailed }
+            try ArchiveGuard.checkTree(dir)
             return try findApp(named: appName, in: dir)
         case .dmg:
             let mountRoot = work.appendingPathComponent("mnt", isDirectory: true)
             try FileManager.default.createDirectory(at: mountRoot, withIntermediateDirectories: true)
             var mounts: [String] = []
             do {
+                try requireVerifiedBytes()
                 let r = try await Tool.run("/usr/bin/hdiutil", ["attach", "-nobrowse", "-readonly", "-noautoopen", "-noverify",
                                                                 "-mountrandom", mountRoot.path, "-plist", archive.path], timeout: 300)
                 mounts = mountPoints(fromAttachPlist: r.stdout)
@@ -521,16 +586,32 @@ public enum SparkleInstaller {
                     }
                 }
                 guard found.count == 1, let source = found.first else { throw SparkleInstallError.appNotFound }
+                // Salt okunur bağlanan uygulamayı kopyalamadan önce boyut ve bağları denetle.
+                try ArchiveGuard.checkTree(source)
                 let target = dir.appendingPathComponent(source.lastPathComponent)
                 let copy = try await Tool.run("/usr/bin/ditto", [source.path, target.path], timeout: 900)
                 guard copy.status == 0 else { throw SparkleInstallError.extractFailed }
                 await detach(mounts, root: mountRoot)
+                try ArchiveGuard.checkTree(dir)
                 return target
             } catch {
                 await detach(mounts, root: mountRoot)
                 throw error
             }
         }
+    }
+
+    /// Arşiv içeriğini diske çıkarmadan açar ve toplam veri sınırını akışta uygular.
+    /// bsdtar ayrıca ZIP verisinin boyut ve sağlama toplamını doğrular.
+    static func verifyArchivePayload(_ archive: URL, maxBytes: Int64 = ArchiveGuard.maxExtractedBytes) async throws {
+        guard maxBytes >= 0 else { throw SparkleInstallError.unsafeArchive }
+        let job = ArchivePayloadCheck(archive: archive, limit: maxBytes)
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            do { try await job.run() }
+            catch { try Task.checkCancellation(); throw error }
+            try Task.checkCancellation()
+        } onCancel: { job.stop() }
     }
 
     /// `hdiutil attach -plist` çıktısındaki bağlama noktaları.
@@ -689,6 +770,70 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
 }
 
 // MARK: - Süreç çalıştırma
+
+/// bsdtar çıktısını diske yazmadan okur; sınır aşılınca ve iptalde süreci durdurur.
+private final class ArchivePayloadCheck: @unchecked Sendable {
+    private let process = Process()
+    private let pipe = Pipe()
+    private let limit: Int64
+    private let lock = NSLock()
+    private var stopped = false
+
+    init(archive: URL, limit: Int64) {
+        self.limit = limit
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/bsdtar")
+        process.arguments = ["-xOf", archive.path]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"]
+    }
+
+    func stop() {
+        lock.withLock { stopped = true }
+        if process.isRunning {
+            process.terminate()
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [self] in
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
+        }
+    }
+
+    func run() async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                do {
+                    try process.run()
+                    try pipe.fileHandleForWriting.close()
+                    if lock.withLock({ stopped }) { stop() }
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 900) { [weak self] in
+                        guard let self, process.isRunning else { return }
+                        stop()
+                    }
+                    var total: Int64 = 0
+                    var exceeded = false
+                    while true {
+                        let data = try pipe.fileHandleForReading.read(upToCount: 64 * 1024) ?? Data()
+                        if data.isEmpty { break }
+                        if Int64(data.count) > limit - total { exceeded = true; stop(); break }
+                        total += Int64(data.count)
+                    }
+                    try? pipe.fileHandleForReading.close()
+                    process.waitUntilExit()
+                    guard !exceeded, !lock.withLock({ stopped }), process.terminationStatus == 0 else {
+                        throw SparkleInstallError.unsafeArchive
+                    }
+                    cont.resume()
+                } catch {
+                    stop()
+                    try? pipe.fileHandleForReading.close()
+                    try? pipe.fileHandleForWriting.close()
+                    cont.resume(throwing: error)
+                }
+            }
+        }
+    }
+}
 
 /// Mutlak yollu bir aracı, kabuk ortamı olmadan çalıştırır. stdout ve stderr ayrı toplanır.
 enum Tool {

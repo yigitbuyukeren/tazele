@@ -45,7 +45,8 @@ final class Store {
     static func isSelectable(_ item: OutdatedItem) -> Bool {
         switch item.source {
         case .sparkle: item.caskToken != nil || SparkleInstaller.canInstall(item)
-        case .system: item.installable
+        // App Store: yalnızca root'a ait, güvenilir bir `mas` varsa; yoksa satır App Store'u açar.
+        case .system, .appStore: item.installable
         default: true
         }
     }
@@ -134,9 +135,13 @@ final class Store {
         finished = false
         failedSteps = 0
         log = []
-        let plan = Updater.steps(for: chosen)
+        let updatePlan = Updater.plan(for: chosen)
+        let plan = updatePlan.steps
         steps = plan.count
         step = 0
+        // Atlanan öğeler (geçersiz ad, güvenilmeyen mas) günlükte gösterilir ve başarısız sayılır.
+        log.append(contentsOf: updatePlan.skipped)
+        failedSteps = updatePlan.skipped.count
         task = Task {
             for item in plan {
                 if Task.isCancelled { break }

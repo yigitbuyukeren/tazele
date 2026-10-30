@@ -12,11 +12,12 @@ import Security
 //     `dlsym` ile bulunur. macOS 27'de hâlâ mevcut; yoksa zincir bir sonraki yönteme geçer.
 //     Çıktı, işlevin verdiği soket üzerinden satır satır okunur. İptalde sokete bir bayt yazılır;
 //     root kabuktaki gözcü bunu (ya da Tazele kapanınca soketin kapanmasını) görüp komutu sonlandırır.
-//  2. osascript: `do shell script … with administrator privileges` (yine sistem penceresi). Komut
-//     çıktısı Tazele'ye ait özel bir geçici dizindeki dosyaya yazılır ve oradan izlenir. İptal için o
-//     dizinde bir işaret dosyası oluşturulur; root betik bunu, dizinin silinmesini ya da Tazele'nin
-//     kapanmasını görünce komutu sonlandırır. Geçici dizin her durumda silinir.
-//  3. sudoAskpass: `sudo -A` + `SUDO_ASKPASS` parola penceresi (eski yol).
+//  2. sudoAskpass: `sudo -A` + `SUDO_ASKPASS` parola penceresi (eski yol, son çare).
+//
+// Eskiden bu ikisinin arasında `osascript` (`do shell script … with administrator privileges`) vardı. Root,
+// çıktısını kullanıcının yazabildiği bir dizindeki dosyaya yazıyordu; aynı kullanıcıyla çalışan bir süreç
+// denetim ile açılış arasında o dosyayı bir sembolik bağla değiştirip root'a istediği dosyaya yazdırabilirdi.
+// Root'un kullanıcı denetimindeki bir yola hiç yazmaması için bu yöntem tamamen kaldırıldı.
 //
 // Bir yöntem `PrivilegeError.unavailable` ile başarısız olursa sıradaki denenir. Kullanıcı pencereyi
 // iptal ederse ya da izin verilmezse zincir durur (aynı soru farklı bir pencereyle tekrar sorulmaz).
@@ -29,12 +30,11 @@ import Security
 //    referans hakları silinerek bırakılır, sonraki adım yeniden sorar.
 //  - sudoAskpass: terminal olmadığından `sudo` zaman damgasını üst süreç kimliğine (Tazele) bağlar;
 //    varsayılan 5 dakika içinde ikinci `sudo` parola sormaz.
-//  - osascript: her `osascript` ayrı bir süreç olduğundan her adımda yeniden sorabilir. Bu yöntem
-//    yalnızca birincisi kullanılamazsa devreye girer.
 //
 // Güvenlik sınırları: Tazele'nin kendi ikili dosyası hiçbir zaman root olarak çalışmaz; ayrıcalıklı
 // yardımcı ya da launch daemon kurulmaz; sistem dosyalarına dokunulmaz. Root olarak yalnızca
-// `PrivilegedCommand.allowedTools` içindeki araçlar, doğrulanmış argümanlarla çalışır. Tek istisna
+// `PrivilegedCommand.allowedTools` içindeki araçlar, doğrulanmış argümanlarla ve yalnızca root'a ait,
+// kullanıcının değiştiremeyeceği bir konumdaysa (`ExecutableTrust`) çalışır. Tek istisna
 // `runSwap`: root'a ait bir /Applications uygulamasının değiştirilmesi; komutu kendisi, sabit bir betikten
 // kurar (bkz. RootSwap.swift). `validate` keyfi betik ya da yol kabul etmez.
 //
@@ -61,7 +61,7 @@ public enum PrivilegedRunner {
     /// Root'a ait bir uygulamanın son değiştirme adımı. `validate` genişletilmez: bu, ayrı ve tipli tek
     /// giriş noktasıdır. Komutu `RootSwap.command(for:)` sabit betikten kendisi kurar; yollar ve değerler
     /// izin penceresinden ÖNCE sıkıca doğrulanır ve konumsal parametre olarak geçer. Yöntem zinciri,
-    /// iptal, geçici dizin ve çıktı akışı `run` ile aynıdır. Ayrıntılar: RootSwap.swift.
+    /// iptal ve çıktı akışı `run` ile aynıdır (authorizationServices → sudoAskpass). Ayrıntılar: RootSwap.swift.
     static func runSwap(_ request: RootSwap.Request, runner: CommandRunner,
                         onLine: (@Sendable (String) -> Void)? = nil) async throws -> CommandResult {
         let command = try RootSwap.command(for: request)
@@ -82,7 +82,6 @@ public enum PrivilegedRunner {
     static func backend(for mechanism: PrivilegeMechanism, runner: CommandRunner) -> any PrivilegeBackend {
         switch mechanism {
         case .authorizationServices: AuthorizationServicesBackend()
-        case .osascript: OsascriptBackend(runner: runner)
         case .sudoAskpass: SudoAskpassBackend(runner: runner)
         }
     }
@@ -140,40 +139,6 @@ enum RootScript {
 
     static func zshArguments(nonce: String, command: [String]) -> [String] {
         ["-f", "-p", "-c", zshBody, "tazele-priv", nonce] + command
-    }
-
-    /// osascript için POSIX `sh` betiği. Çıktı `directory/output.log` dosyasına eklenir; `directory/cancel`
-    /// oluşursa, dizin silinirse ya da `watchedPID` sona ererse komut sonlandırılır.
-    static func shell(command: [String], nonce: String, directory: URL, watchedPID: pid_t) -> String {
-        let q = PrivilegedCommand.shellQuote
-        let marker = "printf '__TAZELE_%s_EXIT__ %d\\n' \(q(nonce))"
-        return """
-        d=\(q(directory.path)); o="$d/output.log"; c="$d/cancel"; w=\(watchedPID)
-        [ -d "$d" ] && [ -f "$o" ] && [ ! -L "$o" ] || exit 0
-        exec 3>>"$o"
-        if [ -e "$c" ]; then \(marker) 143 >&3; exit 0; fi
-        PATH=\(safePath); export PATH
-        if [ "$(id -u)" = 0 ]; then HOME=/var/root; export HOME; fi
-        \(command.map(q).joined(separator: " ")) </dev/null >&3 2>&1 3>&- &
-        p=$!
-        while kill -0 "$p" 2>/dev/null; do
-          if [ -e "$c" ] || [ ! -d "$d" ] || ! kill -0 "$w" 2>/dev/null; then
-            kill -TERM "$p" 2>/dev/null; sleep 2; kill -KILL "$p" 2>/dev/null; break
-          fi
-          sleep 0.2
-        done
-        wait "$p"; s=$?
-        \(marker) "$s" >&3
-        exit 0
-        """
-    }
-
-    static func appleScript(shell: String, administrator: Bool, prompt: String) -> String {
-        var s = "do shell script " + PrivilegedCommand.appleScriptLiteral(shell)
-        if administrator {
-            s += " with prompt " + PrivilegedCommand.appleScriptLiteral(prompt) + " with administrator privileges"
-        }
-        return s
     }
 }
 
@@ -248,29 +213,6 @@ final class PrivilegedOutputParser: @unchecked Sendable {
     func result(timedOut: Bool = false) -> CommandResult? {
         guard let status = exitStatus else { return nil }
         return CommandResult(status: status, output: output, timedOut: timedOut)
-    }
-}
-
-/// Büyüyen bir dosyanın yeni eklenen kısmını okur.
-final class FileTail {
-    let url: URL
-    private(set) var offset: UInt64 = 0
-
-    init(url: URL) { self.url = url }
-
-    func readNew() -> Data {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return Data() }
-        defer { try? handle.close() }
-        guard (try? handle.seek(toOffset: offset)) != nil, let data = try? handle.readToEnd() else { return Data() }
-        offset += UInt64(data.count)
-        return data
-    }
-}
-
-/// Engellemeyen bekleme: iptal edilmiş görevde de gerçekten bekler (temizlik döngüleri için).
-func pause(_ seconds: Double) async {
-    await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-        DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { c.resume() }
     }
 }
 
@@ -508,96 +450,7 @@ struct AuthorizationServicesBackend: PrivilegeBackend {
     }
 }
 
-// MARK: - 2) osascript
-
-private final class LaunchBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: Result<CommandResult, Error>?
-    var result: Result<CommandResult, Error>? { lock.withLock { value } }
-    func set(_ r: Result<CommandResult, Error>) { lock.withLock { value = r } }
-}
-
-struct OsascriptBackend: PrivilegeBackend {
-    let runner: CommandRunner
-    /// Testlerde false: aynı betik yetkisiz çalışır, pencere açılmaz.
-    var administrator = true
-    var temporaryRoot = FileManager.default.temporaryDirectory
-    var pollInterval = 0.2
-    /// İptalden sonra root betiğin çıkış kodunu yazması için beklenen en uzun süre.
-    var cancelGrace = 5.0
-
-    func run(_ command: [String], onLine: (@Sendable (String) -> Void)?) async throws -> CommandResult {
-        let directory = try Self.makePrivateDirectory(in: temporaryRoot)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let outputURL = directory.appendingPathComponent("output.log")
-        guard FileManager.default.createFile(atPath: outputURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
-        else { throw PrivilegeError.unavailable(.osascript, outputURL.path) }
-
-        let nonce = PrivilegedRunner.makeNonce()
-        let shell = RootScript.shell(command: command, nonce: nonce, directory: directory, watchedPID: getpid())
-        let script = RootScript.appleScript(shell: shell, administrator: administrator, prompt: PrivilegedRunner.prompt)
-        let parser = PrivilegedOutputParser(nonce: nonce, onLine: onLine)
-        let tail = FileTail(url: outputURL)
-
-        let box = LaunchBox()
-        let runner = self.runner
-        let launch = Task {
-            do { box.set(.success(try await runner.run(["/usr/bin/osascript", "-e", script]))) }
-            catch { box.set(.failure(error)) }
-        }
-
-        var cancelledAt: Date?
-        while true {
-            parser.feed(tail.readNew())
-            if parser.exitStatus != nil { break }
-            if let launched = box.result {
-                parser.feed(tail.readNew())
-                parser.finish()
-                if parser.exitStatus != nil { break }
-                if cancelledAt != nil { break }
-                throw Self.error(from: launched)
-            }
-            if Task.isCancelled {
-                if cancelledAt == nil {
-                    cancelledAt = Date()
-                    FileManager.default.createFile(atPath: directory.appendingPathComponent("cancel").path, contents: nil)
-                } else if let at = cancelledAt, Date().timeIntervalSince(at) > cancelGrace {
-                    break
-                }
-            }
-            await pause(pollInterval)
-        }
-        parser.finish()
-        if cancelledAt != nil { launch.cancel() }
-        await launch.value
-        if let result = parser.result() { return result }
-        return CommandResult(status: 128 + SIGTERM, output: parser.output, timedOut: false)
-    }
-
-    /// osascript çıkış koduna göre hata: -128 iptal, -60005 ret, diğerleri yöntem kullanılamaz.
-    static func error(from launched: Result<CommandResult, Error>) -> PrivilegeError {
-        switch launched {
-        case .failure(let error):
-            return .unavailable(.osascript, error.localizedDescription)
-        case .success(let r):
-            if r.text.contains("(-128)") { return .canceled }
-            if r.text.contains("(-60005)") { return .denied }
-            if r.status == 0 { return .incompleteOutput }
-            return .unavailable(.osascript, r.text.trimmingCharacters(in: .whitespacesAndNewlines))
-        }
-    }
-
-    /// Yalnızca kullanıcının erişebildiği (0700) yeni bir dizin.
-    static func makePrivateDirectory(in root: URL) throws -> URL {
-        var template = Array(root.appendingPathComponent("tazele-priv-XXXXXXXX").path.utf8CString)
-        guard let made = template.withUnsafeMutableBufferPointer({ mkdtemp($0.baseAddress!) }) else {
-            throw PrivilegeError.unavailable(.osascript, "mkdtemp \(errno)")
-        }
-        return URL(fileURLWithPath: String(cString: made), isDirectory: true)
-    }
-}
-
-// MARK: - 3) sudo -A
+// MARK: - 2) sudo -A
 
 struct SudoAskpassBackend: PrivilegeBackend {
     let runner: CommandRunner

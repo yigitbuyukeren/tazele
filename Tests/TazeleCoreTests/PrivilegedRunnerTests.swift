@@ -9,10 +9,30 @@ import Testing
 
     // MARK: Doğrulama ve tırnaklama
 
-    @Test func validatesMasWithNumericIDs() throws {
-        let cmd = try PrivilegedCommand.validate(["mas", "update", "111", "222"], searchPath: "/opt/homebrew/bin:/usr/local/bin")
-        if let first = cmd.first { #expect(first.hasPrefix("/") && first.hasSuffix("/mas")) }
-        #expect(Array(cmd.dropFirst()) == ["update", "111", "222"])
+    @Test func rejectsUntrustedMas() {
+        #expect(throws: PrivilegeError.self) {
+            try PrivilegedCommand.validate(["mas", "update", "111", "222"], searchPath: "/nonexistent")
+        }
+    }
+
+    @Test func validatesNumericMasIDsOnlyWithTrustedExecutable() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tazele-mas-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let tool = dir.appendingPathComponent("mas")
+        try Data("fake".utf8).write(to: tool)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: tool.path)
+        let trust = ExecutableTrust(inspect: { path in
+            path == tool.path ? .init(uid: 0, mode: S_IFREG | 0o755) : .init(uid: 0, mode: S_IFDIR | 0o755)
+        }, realPath: { $0 })
+        let command = try PrivilegedCommand.validate([tool.path, "update", "111", "222"], searchPath: "", trust: trust)
+        #expect(command == [tool.path, "update", "111", "222"])
+        #expect(throws: PrivilegeError.self) {
+            try PrivilegedCommand.validate([tool.path, "update", "111;id"], searchPath: "", trust: trust)
+        }
+        #expect(throws: PrivilegeError.self) {
+            try PrivilegedCommand.validate([tool.path, "update", "111"], searchPath: "", trust: .live)
+        }
     }
 
     @Test(arguments: [
@@ -61,22 +81,13 @@ import Testing
         #expect(PrivilegedCommand.isNumeric("0123") && !PrivilegedCommand.isNumeric("1.2") && !PrivilegedCommand.isNumeric("١"))
     }
 
-    @Test func quoting() {
-        #expect(PrivilegedCommand.shellQuote("it's") == "'it'\\''s'")
-        #expect(PrivilegedCommand.appleScriptLiteral("a\"b\\c\nd") == "\"a\\\"b\\\\c\\nd\"")
-        let s = RootScript.appleScript(shell: "echo 1", administrator: true, prompt: "P \"x\"")
-        #expect(s == "do shell script \"echo 1\" with prompt \"P \\\"x\\\"\" with administrator privileges")
-        #expect(RootScript.appleScript(shell: "echo 1", administrator: false, prompt: "P") == "do shell script \"echo 1\"")
-    }
-
     // MARK: Yöntem seçimi ve yedek zinciri
 
     @Test func chainSelection() {
         let all: (PrivilegeMechanism) -> Bool = { _ in true }
-        #expect(PrivilegeMechanism.chain(preferred: nil, isAvailable: all) == [.authorizationServices, .osascript, .sudoAskpass])
-        #expect(PrivilegeMechanism.chain(preferred: .osascript, isAvailable: all) == [.osascript, .sudoAskpass])
+        #expect(PrivilegeMechanism.chain(preferred: nil, isAvailable: all) == [.authorizationServices, .sudoAskpass])
         #expect(PrivilegeMechanism.chain(preferred: .sudoAskpass, isAvailable: all) == [.sudoAskpass])
-        #expect(PrivilegeMechanism.chain(preferred: nil, isAvailable: { $0 != .authorizationServices }) == [.osascript, .sudoAskpass])
+        #expect(PrivilegeMechanism.chain(preferred: nil, isAvailable: { $0 != .authorizationServices }) == [.sudoAskpass])
         #expect(PrivilegeMechanism.chain(preferred: .authorizationServices, isAvailable: { $0 == .sudoAskpass }) == [.sudoAskpass])
         #expect(PrivilegeMechanism.chain(preferred: nil, isAvailable: { _ in false }).isEmpty)
     }
@@ -87,7 +98,7 @@ import Testing
         defer { defaults.removePersistentDomain(forName: suite) }
         #expect(PrivilegeMechanism.preferred(in: defaults) == nil)
         defaults.set("osascript", forKey: PrivilegeMechanism.defaultsKey)
-        #expect(PrivilegeMechanism.preferred(in: defaults) == .osascript)
+        #expect(PrivilegeMechanism.preferred(in: defaults) == nil)
         defaults.set("bogus", forKey: PrivilegeMechanism.defaultsKey)
         #expect(PrivilegeMechanism.preferred(in: defaults) == nil)
     }
@@ -129,8 +140,8 @@ import Testing
 
     @Test func fallsBackOnlyWhenUnavailable() async {
         let (r1, c1) = await runChain([.authorizationServices: .failure(.unavailable(.authorizationServices, "x")),
-                                       .osascript: .success(7)])
-        #expect(c1 == [.authorizationServices, .osascript])
+                                       .sudoAskpass: .success(7)])
+        #expect(c1 == [.authorizationServices, .sudoAskpass])
         #expect((try? r1.get()) == 7)
 
         // Kullanıcı iptal ederse başka pencere açılmaz.
@@ -147,7 +158,7 @@ import Testing
         #expect(c4 == [.authorizationServices] && (try? r4.get()) == 3)
 
         let unavailable: Result<Int32, PrivilegeError> = .failure(.unavailable(.sudoAskpass, "x"))
-        let (r5, c5) = await runChain([.authorizationServices: unavailable, .osascript: unavailable, .sudoAskpass: unavailable])
+        let (r5, c5) = await runChain([.authorizationServices: unavailable, .sudoAskpass: unavailable])
         #expect(c5 == PrivilegeMechanism.allCases)
         #expect(throws: PrivilegeError.unavailable(.sudoAskpass, "x")) { try r5.get() }
 
@@ -193,22 +204,6 @@ import Testing
         #expect(lines.all.isEmpty)
         p.finish()
         #expect(lines.all == ["yarım"] && p.result() == nil)
-    }
-
-    @Test func fileTailReadsOnlyNewBytes() throws {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("tazele-tail-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let tail = FileTail(url: url)
-        #expect(tail.readNew().isEmpty)   // henüz yok
-        try Data("a\nb".utf8).write(to: url)
-        let lines = Lines()
-        let p = PrivilegedOutputParser(nonce: "T", onLine: { lines.add($0) })
-        p.feed(tail.readNew())
-        let h = try FileHandle(forWritingTo: url)
-        try h.seekToEnd(); try h.write(contentsOf: Data("c\n__TAZELE_T_EXIT__ 0\n".utf8)); try h.close()
-        p.feed(tail.readNew())
-        #expect(tail.readNew().isEmpty)
-        #expect(lines.all == ["a", "bc"] && p.exitStatus == 0)
     }
 
     // MARK: authorizationServices sarmalayıcısı (yetkisiz çalıştırılır)
@@ -275,68 +270,11 @@ import Testing
         #expect(Date().timeIntervalSince(start) < 10)
     }
 
-    // MARK: osascript yolu (yönetici yetkisi olmadan, pencere açılmaz)
-
-    private func tempRoot() throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("tazele-priv-test-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
-
-    private func contents(_ url: URL) -> [String] {
-        (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? ["?"]
-    }
-
-    @Test func osascriptPathStreamsAndCleansUp() async throws {
-        let root = try tempRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let backend = OsascriptBackend(runner: CommandRunner(), administrator: false, temporaryRoot: root, pollInterval: 0.05)
-        let lines = Lines()
-        let r = try await backend.run(["/bin/sh", "-c", "echo \"it's ok\"; echo 'çıktı \\ \"x\"'; exit 4", "x"],
-                                      onLine: { lines.add($0) })
-        #expect(r.status == 4)
-        #expect(lines.all == ["it's ok", "çıktı \\ \"x\""])
-        #expect(contents(root).isEmpty)
-    }
-
-    @Test func osascriptPathCancelStopsCommandAndRemovesTempFiles() async throws {
-        let root = try tempRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let backend = OsascriptBackend(runner: CommandRunner(), administrator: false, temporaryRoot: root, pollInterval: 0.05)
-        let start = Date()
-        let task = Task { try await backend.run(["/bin/sleep", "30"], onLine: nil) }
-        try await Task.sleep(for: .milliseconds(1500))
-        #expect(contents(root).count == 1)   // çalışırken özel dizin var
-        task.cancel()
-        let r = try await task.value
-        #expect(Date().timeIntervalSince(start) < 12)
-        #expect(r.status == 143)
-        #expect(contents(root).isEmpty)
-    }
-
-    @Test func osascriptErrorsMapToPrivilegeErrors() {
-        func r(_ status: Int32, _ text: String) -> Result<CommandResult, Error> {
-            .success(CommandResult(status: status, output: Data(text.utf8), timedOut: false))
-        }
-        #expect(OsascriptBackend.error(from: r(1, "execution error: User canceled. (-128)")) == .canceled)
-        #expect(OsascriptBackend.error(from: r(1, "execution error: incorrect (-60005)")) == .denied)
-        #expect(OsascriptBackend.error(from: r(1, "syntax error")) == .unavailable(.osascript, "syntax error"))
-        #expect(OsascriptBackend.error(from: r(0, "")) == .incompleteOutput)
-    }
-
-    @Test func privateDirectoryIsOwnerOnly() throws {
-        let root = try tempRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let dir = try OsascriptBackend.makePrivateDirectory(in: root)
-        let mode = try FileManager.default.attributesOfItem(atPath: dir.path)[.posixPermissions] as? Int
-        #expect(mode == 0o700)
-    }
-
     // MARK: Elle doğrulama (insan gerekir)
 
     /// GERÇEK izin penceresi açar ve `/usr/bin/id -u` komutunu iki kez root olarak çalıştırır.
     /// Yalnızca elle: `TAZELE_PRIV_SELFTEST=1 swift test --filter PrivilegedRunnerTests/manualSelfTest`
-    /// İsteğe bağlı: `TAZELE_PRIV_MECHANISM=osascript` (ya da sudoAskpass) ile yöntem seçilir.
+    /// İsteğe bağlı: `TAZELE_PRIV_MECHANISM=sudoAskpass` ile yöntem seçilir.
     /// Beklenen: tek pencere (Touch ID seçeneğiyle), iki çıktı da "0".
     @Test(.enabled(if: ProcessInfo.processInfo.environment["TAZELE_PRIV_SELFTEST"] == "1"))
     func manualSelfTest() async throws {
