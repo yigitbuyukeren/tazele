@@ -42,9 +42,15 @@ struct ContentView: View {
             if !store.isUpdating, !store.log.isEmpty { logDisclosure }
             primaryAction
             if needsPasswordHint && !store.isUpdating {
-                Label("App Store güncellemesi için yönetici parolası istenecek", systemImage: "lock.fill")
-                    .font(.system(size: 10.5)).tracking(0.1).foregroundStyle(.secondary)
-                    .transition(.opacity)
+                Group {
+                    if needsStorePasswordHint {
+                        Label("App Store güncellemesi için yönetici parolası istenecek", systemImage: "lock.fill")
+                    } else {
+                        Label("Uygulama güncellemesi için yönetici izni istenecek", systemImage: "lock.fill")
+                    }
+                }
+                .font(.system(size: 10.5)).tracking(0.1).foregroundStyle(.secondary)
+                .transition(.opacity)
             }
             footer
         }
@@ -486,8 +492,15 @@ struct ContentView: View {
     }
 
     /// App Store ve macOS güncellemeleri `sudo` ile çalışır.
-    private var needsPasswordHint: Bool {
+    private var needsStorePasswordHint: Bool {
         store.selectedItems.contains { $0.source == .appStore || $0.source == .system }
+    }
+
+    /// Ayrıca root'a ait bir /Applications uygulamasının Tazele'den kurulumu yönetici izni ister.
+    private var needsPasswordHint: Bool {
+        needsStorePasswordHint || store.selectedItems.contains {
+            $0.source == .sparkle && $0.caskToken == nil && SparkleInstaller.requiresAdministrator($0)
+        }
     }
 
     // MARK: Alt çubuk

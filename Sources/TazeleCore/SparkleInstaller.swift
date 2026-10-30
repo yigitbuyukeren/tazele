@@ -1,6 +1,7 @@
 import AppKit
 import CryptoKit
 import Foundation
+import Security
 
 public enum SparkleInstallError: Error, LocalizedError, Equatable {
     case notSupported
@@ -48,7 +49,12 @@ public enum SparkleInstallError: Error, LocalizedError, Equatable {
 /// Sparkle uygulamasını Sparkle'ın kendi güvenlik modeliyle kurar; üçüncü taraf ikili kullanmaz:
 /// https indirme → arşiv baytlarında Ed25519 imzası (`SUPublicEDKey`) → arşivi açma →
 /// paket kimliği, kod imzası, ekip kimliği ve sürüm denetimi → uygulamayı kibarca kapatma →
-/// yedekli değiştirme (hata olursa geri yükleme) → yeniden açma. Root istemez, sudo kullanmaz.
+/// yedekli değiştirme (hata olursa geri yükleme) → yeniden açma.
+///
+/// Kullanıcının yazabildiği uygulamalar root istemeden değiştirilir. Kullanıcının yazamadığı (ör. .pkg ile
+/// kurulmuş, root'a ait) uygulamalar yalnızca doğrudan /Applications içindeyse ve ekip kimliğiyle
+/// imzalıysa kurulabilir: tüm doğrulama yine kullanıcı yetkisiyle yapılır, izin penceresi ancak her şey
+/// geçtikten sonra açılır ve yalnızca son değiştirme adımı root olarak çalışır (bkz. RootSwap.swift).
 public enum SparkleInstaller {
     /// İndirme üst sınırı (2 GB).
     static let maxDownloadBytes: Int64 = 2 * 1024 * 1024 * 1024
@@ -61,6 +67,9 @@ public enum SparkleInstaller {
     enum Rejection: Equatable, Sendable {
         case notSparkle, noDownload, insecureURL, noSignature, badKey, unsupportedArchive, badBundleID
         case noPath, protectedLocation, missing, symlink, macAppStore, notWritable
+        /// Yazılamayan (yönetici izni gerekecek) uygulamanın ekip kimliği yok (ad-hoc / imzasız):
+        /// root yolunda güven çıpası ekip kimliğidir, bu yüzden kurulmaz.
+        case unsignedRootApp
     }
 
     /// Dosya sistemi denetimleri; testlerde yazılamaz konum taklit edilebilsin diye ayrı.
@@ -68,6 +77,12 @@ public enum SparkleInstaller {
         var exists: @Sendable (String) -> Bool
         var isSymlink: @Sendable (String) -> Bool
         var isWritable: @Sendable (String) -> Bool
+        /// Kurulu uygulamanın ekip kimliği (imza bilgisinden, doğrulama yapmadan); yoksa nil.
+        var teamIdentifier: @Sendable (String) -> String? = { SparkleInstaller.signingTeam(atPath: $0) }
+        /// Sembolik bağları çözülmüş gerçek yol; yoksa nil.
+        var realPath: @Sendable (String) -> String? = { RootSwap.realPath($0) }
+        /// Yönetici izniyle kurulumun kabul edildiği tek klasör (testler sahte bir klasör verir).
+        var applicationsDirectory = RootSwap.applicationsDirectory
 
         static let live = FileProbe(
             exists: { FileManager.default.fileExists(atPath: $0) },
@@ -75,8 +90,23 @@ public enum SparkleInstaller {
             isWritable: { FileManager.default.isWritableFile(atPath: $0) })
     }
 
-    /// Bu öğe Tazele'den kurulabilir mi? (EdDSA imzalı, https, desteklenen arşiv, yazılabilir konum.)
+    /// Bu öğe Tazele'den kurulabilir mi? (EdDSA imzalı, https, desteklenen arşiv; yazılabilir konum ya da
+    /// ekip kimliğiyle imzalı, doğrudan /Applications içindeki uygulama.)
     public static func canInstall(_ item: OutdatedItem) -> Bool { rejection(for: item) == nil }
+
+    /// Kurulumu yönetici izni isteyecek mi? (Kurulabilir ve kullanıcı konumu yazamıyor.)
+    public static func requiresAdministrator(_ item: OutdatedItem) -> Bool { requiresAdministrator(item, probe: .live) }
+
+    static func requiresAdministrator(_ item: OutdatedItem, probe: FileProbe,
+                                      ownBundleID: String? = Bundle.main.bundleIdentifier) -> Bool {
+        guard rejection(for: item, probe: probe, ownBundleID: ownBundleID) == nil,
+              let path = item.path, let app = appLocation(path) else { return false }
+        return !isUserWritable(app, probe: probe)
+    }
+
+    static func isUserWritable(_ app: URL, probe: FileProbe) -> Bool {
+        probe.isWritable(app.deletingLastPathComponent().path) && probe.isWritable(app.path)
+    }
 
     static func rejection(for item: OutdatedItem, probe: FileProbe = .live,
                           ownBundleID: String? = Bundle.main.bundleIdentifier) -> Rejection? {
@@ -94,8 +124,30 @@ public enum SparkleInstaller {
         guard probe.exists(app.path) else { return .missing }
         guard !probe.isSymlink(app.path) else { return .symlink }
         guard !probe.exists(app.appendingPathComponent("Contents/_MASReceipt").path) else { return .macAppStore }
-        guard probe.isWritable(app.deletingLastPathComponent().path), probe.isWritable(app.path) else { return .notWritable }
+        if isUserWritable(app, probe: probe) { return nil }
+        return rootRejection(path: path, probe: probe)
+    }
+
+    /// Yazılamayan uygulama için yönetici yolu uygun mu? Yalnızca tam olarak "/Applications/<ad>.app"
+    /// (iç içe değil, başka yerde değil, sembolik bağ değil) ve kurulu uygulamanın ekip kimliği varsa.
+    static func rootRejection(path: String, probe: FileProbe) -> Rejection? {
+        let apps = probe.applicationsDirectory
+        guard !RootSwap.hasControlCharacters(path), RootSwap.isInstalledPathShape(path, applications: apps)
+        else { return .notWritable }
+        guard !probe.isSymlink(apps), probe.realPath(apps) == apps, probe.realPath(path) == path else { return .notWritable }
+        guard let team = probe.teamIdentifier(path), RootSwap.isTeamID(team) else { return .unsignedRootApp }
         return nil
+    }
+
+    /// İmza bilgisindeki ekip kimliği (Security; kod doğrulanmaz, yalnızca okunur). Ad-hoc / imzasızsa nil.
+    static func signingTeam(atPath path: String) -> String? {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code) == errSecSuccess, let code
+        else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let dict = info as? [String: Any] else { return nil }
+        return dict[kSecCodeInfoTeamIdentifier as String] as? String
     }
 
     static func isSecure(_ url: URL?) -> Bool {
@@ -195,6 +247,16 @@ public enum SparkleInstaller {
         var relaunch: @Sendable (URL) async -> Bool
         /// Uygulamayla aynı birimde geçici çalışma klasörü (taşıma atomik olsun diye).
         var makeWorkDirectory: @Sendable (URL) throws -> URL
+        /// Uygulamanın ekip kimliği (`codesign -dv`); ad-hoc / imzasızsa nil.
+        var codeTeam: @Sendable (URL) async -> String? = { await SparkleInstaller.team(of: $0) }
+        /// Yönetici yolu için: kod imzası Apple köklü ve verilen ekibe ait mi (izin penceresinden önce).
+        var verifyTeamAnchor: @Sendable (URL, String) async -> Bool = { await SparkleInstaller.verifyAnchoredTeam($0, team: $1) }
+        /// Yönetici yolu için: doğrulanan yeni paketin CDHash'i (root kopyası buna bağlanır).
+        var codeHash: @Sendable (URL) async -> String? = { await SparkleInstaller.cdhash(of: $0) }
+        /// Yönetici izniyle son değiştirme adımı (`PrivilegedRunner.runSwap`).
+        var privilegedSwap: @Sendable (RootSwap.Request, @escaping @Sendable (String) -> Void) async throws -> CommandResult = {
+            request, onLine in try await PrivilegedRunner.runSwap(request, runner: CommandRunner(), onLine: onLine)
+        }
 
         static let live = Environment(
             fetch: { download, dir in try await Downloader.fetch(download, into: dir) },
@@ -206,22 +268,24 @@ public enum SparkleInstaller {
             })
     }
 
-    public static func install(_ item: OutdatedItem, onLine: @Sendable (String) -> Void) async throws {
+    public static func install(_ item: OutdatedItem, onLine: @escaping @Sendable (String) -> Void) async throws {
         try await install(item, onLine: onLine, environment: .live)
     }
 
-    static func install(_ item: OutdatedItem, onLine: @Sendable (String) -> Void, environment env: Environment) async throws {
+    static func install(_ item: OutdatedItem, onLine: @escaping @Sendable (String) -> Void, environment env: Environment,
+                        probe: FileProbe = .live) async throws {
         do {
-            try await perform(item, onLine: onLine, env: env)
+            try await perform(item, onLine: onLine, env: env, probe: probe)
         } catch is CancellationError {
             onLine(String(localized: "Kurulum iptal edildi", bundle: .main))
             throw SparkleInstallError.cancelled
         }
     }
 
-    private static func perform(_ item: OutdatedItem, onLine: @Sendable (String) -> Void, env: Environment) async throws {
+    private static func perform(_ item: OutdatedItem, onLine: @escaping @Sendable (String) -> Void, env: Environment,
+                                probe: FileProbe) async throws {
         let fm = FileManager.default
-        guard rejection(for: item) == nil, let d = item.download, let sig = d.edSignature, let path = item.path,
+        guard rejection(for: item, probe: probe) == nil, let d = item.download, let sig = d.edSignature, let path = item.path,
               let appURL = appLocation(path),
               let kind = archiveKind(url: d.url, type: d.type, installationType: d.installationType)
         else { throw SparkleInstallError.notSupported }
@@ -234,6 +298,8 @@ public enum SparkleInstaller {
         else { throw SparkleInstallError.keyMismatch }
         let installedVersion = installedInfo["CFBundleVersion"] as? String ?? ""
         let appName = appURL.deletingPathExtension().lastPathComponent
+        // Yönetici yolu mu? (Kurulabilirlik zaten denetlendi: yazılamıyorsa doğrudan /Applications'ta ve ekip imzalı.)
+        let administrator = !isUserWritable(appURL, probe: probe)
 
         let work = try env.makeWorkDirectory(appURL)
         var keepWork = false
@@ -275,13 +341,27 @@ public enum SparkleInstaller {
         guard isNewer(newVersion, than: installedVersion) else { throw SparkleInstallError.notNewer }
         let verify = try await Tool.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", newApp.path], timeout: 300)
         guard verify.status == 0 else { throw SparkleInstallError.codeSignatureInvalid }
-        let installedTeam = await team(of: appURL)
+        let installedTeam = await env.codeTeam(appURL)
         if let installedTeam {
-            guard await team(of: newApp) == installedTeam else { throw SparkleInstallError.teamMismatch }
+            guard await env.codeTeam(newApp) == installedTeam else { throw SparkleInstallError.teamMismatch }
+            if administrator {
+                // Root yolunda güven çıpası ekip kimliğidir: kendinden imzalı sertifikayla taklit edilmesin diye
+                // imza zinciri Apple köküne bağlanmalı. Kötü paket izin penceresi hiç açılmadan reddedilir.
+                guard RootSwap.isTeamID(installedTeam), await env.verifyTeamAnchor(newApp, installedTeam)
+                else { throw SparkleInstallError.codeSignatureInvalid }
+            }
+        } else if administrator {
+            throw SparkleInstallError.notSupported
         } else {
             // Kurulu uygulama ad-hoc / imzasızsa güven yalnızca EdDSA anahtarına dayanır: anahtar değişmemeli.
             let newKey = (newInfo["SUPublicEDKey"] as? String)?.filter { !$0.isWhitespace }
             guard newKey == installedKey else { throw SparkleInstallError.keyMismatch }
+        }
+        // Yönetici yolunda root kopyası, burada doğrulanan içeriğe CDHash ile bağlanır.
+        var verifiedHash: String?
+        if administrator {
+            guard let hash = await env.codeHash(newApp), RootSwap.isCDHash(hash) else { throw SparkleInstallError.codeSignatureInvalid }
+            verifiedHash = hash
         }
 
         // e) Çalışıyorsa kibarca kapatma
@@ -292,6 +372,19 @@ public enum SparkleInstaller {
             guard await env.terminate(d.bundleID, quitTimeout) else { throw SparkleInstallError.appStillRunning }
         }
         // Bu noktadan sonra iptal edilmez: değiştirme kısa ve geri alınabilir olmalı.
+
+        if administrator, let installedTeam, let verifiedHash {
+            // Yönetici yolu: izin penceresi ancak şimdi, tüm doğrulamalardan sonra açılır. İptal, root betiği
+            // kritik bölüme (yedek + yerleştirme) girene kadar işler; o bölüm yarıda kesilmez.
+            // Kurulu yol, kurulabilirlik denetiminin tam olarak onayladığı ham yoldur (standartlaştırılmaz).
+            try await swapAsAdministrator(
+                RootSwap.Request(installed: URL(fileURLWithPath: path), staged: newApp, workDirectory: work, bundleID: d.bundleID,
+                                 version: newVersion, team: installedTeam, cdhash: verifiedHash),
+                appName: appName, wasRunning: wasRunning, onLine: onLine, env: env)
+            let shown = newInfo["CFBundleShortVersionString"] as? String ?? newVersion
+            onLine(String(localized: "\(appName) güncellendi: \(shown)", bundle: .main))
+            return
+        }
 
         // f) Yedekli değiştirme
         onLine(String(localized: "Uygulama değiştiriliyor", bundle: .main))
@@ -334,11 +427,66 @@ public enum SparkleInstaller {
         onLine(String(localized: "\(appName) güncellendi: \(shown)", bundle: .main))
     }
 
+    /// Yönetici izniyle değiştirme ve sonucun yorumlanması. İzin penceresi ancak burada, tüm kullanıcı düzeyi
+    /// doğrulamalar geçtikten sonra açılır. Başarısızlıkta eski sürüm root betiği tarafından yerinde bırakılır
+    /// ya da geri yüklenir; uygulama kapatıldıysa yeniden açılır.
+    private static func swapAsAdministrator(_ request: RootSwap.Request, appName: String, wasRunning: Bool,
+                                            onLine: @escaping @Sendable (String) -> Void, env: Environment) async throws {
+        let appURL = request.installed
+        onLine(String(localized: "Yönetici izni isteniyor: \(appName)", bundle: .main))
+        let translator = RootSwap.LineTranslator(onLine: onLine)
+        let result: CommandResult
+        do {
+            result = try await env.privilegedSwap(request) { translator.feed($0) }
+        } catch {
+            // İzin verilmedi / iptal / yöntem yok / doğrulama reddi: root adımı başlamadı, uygulama yerinde.
+            if wasRunning { _ = await env.relaunch(appURL) }
+            throw error
+        }
+        let placed = bundleInfo(appURL)
+        let placedOK = placed?["CFBundleIdentifier"] as? String == request.bundleID
+            && placed?["CFBundleVersion"] as? String == request.version
+        let outcome = RootSwap.Outcome(status: result.status)
+        // İptal kritik bölümde geldiyse betik değiştirmeyi tamamlar; sonuç diskte doğrulanır.
+        if translator.sawOK && placedOK && (outcome == .success || outcome == .cancelled) {
+            if wasRunning {
+                onLine(String(localized: "Yeniden açılıyor: \(appName)", bundle: .main))
+                if !(await env.relaunch(appURL)) { onLine(String(localized: "Uygulama yeniden açılamadı; elle açabilirsin", bundle: .main)) }
+            }
+            return
+        }
+        if wasRunning { _ = await env.relaunch(appURL) }
+        switch outcome {
+        case .codeSignature, .codeHash: throw SparkleInstallError.codeSignatureInvalid
+        case .team: throw SparkleInstallError.teamMismatch
+        case .bundleID, .version: throw SparkleInstallError.bundleMismatch
+        case .cancelled: throw SparkleInstallError.cancelled
+        default:
+            if bundleInfo(appURL) == nil {
+                onLine(String(localized: "Uygulama yerinde bulunamadı; yönetici olarak değiştirme yarıda kalmış olabilir", bundle: .main))
+            }
+            throw SparkleInstallError.swapFailed
+        }
+    }
+
+    /// `codesign --verify --deep --strict` + Apple köklü, belirtilen ekibe ait imza gereksinimi.
+    static func verifyAnchoredTeam(_ app: URL, team: String) async -> Bool {
+        guard RootSwap.isTeamID(team) else { return false }
+        let r = try? await Tool.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", RootSwap.requirement(team: team), app.path],
+                                    timeout: 300)
+        return r?.status == 0
+    }
+
+    static func cdhash(of app: URL) async -> String? {
+        guard let r = try? await Tool.run("/usr/bin/codesign", ["-dv", "--verbose=4", app.path], timeout: 120) else { return nil }
+        return RootSwap.cdhash(fromCodesignOutput: String(decoding: r.stderr + r.stdout, as: UTF8.self))
+    }
+
     static func bundleInfo(_ app: URL) -> [String: Any]? {
         NSDictionary(contentsOf: app.appendingPathComponent("Contents/Info.plist")) as? [String: Any]
     }
 
-    private static func team(of app: URL) async -> String? {
+    static func team(of app: URL) async -> String? {
         guard let r = try? await Tool.run("/usr/bin/codesign", ["-dv", "--verbose=2", app.path], timeout: 120) else { return nil }
         return teamIdentifier(fromCodesignOutput: String(decoding: r.stderr + r.stdout, as: UTF8.self))
     }

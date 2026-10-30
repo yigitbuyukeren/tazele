@@ -34,7 +34,9 @@ import Security
 //
 // Güvenlik sınırları: Tazele'nin kendi ikili dosyası hiçbir zaman root olarak çalışmaz; ayrıcalıklı
 // yardımcı ya da launch daemon kurulmaz; sistem dosyalarına dokunulmaz. Root olarak yalnızca
-// `PrivilegedCommand.allowedTools` içindeki araçlar, doğrulanmış argümanlarla çalışır.
+// `PrivilegedCommand.allowedTools` içindeki araçlar, doğrulanmış argümanlarla çalışır. Tek istisna
+// `runSwap`: root'a ait bir /Applications uygulamasının değiştirilmesi; komutu kendisi, sabit bir betikten
+// kurar (bkz. RootSwap.swift). `validate` keyfi betik ya da yol kabul etmez.
 //
 // Not (yalnızca belge): sudo yolunda da Touch ID istenirse kullanıcı kendisi
 // `/etc/pam.d/sudo_local` dosyasına `auth sufficient pam_tid.so` satırını ekleyebilir
@@ -48,9 +50,26 @@ protocol PrivilegeBackend: Sendable {
 
 /// Root gerektiren komutları yürütür.
 public enum PrivilegedRunner {
+    /// Belirli bir işlem için izin penceresi metni (yalnızca o görev ağacında geçerli).
+    @TaskLocal static var promptOverride: String?
+
     /// İzin penceresinde gösterilen açıklama.
     static var prompt: String {
-        String(localized: "Tazele, App Store ve macOS güncellemelerini yüklemek için yönetici izni istiyor.", bundle: .main)
+        promptOverride ?? String(localized: "Tazele, App Store ve macOS güncellemelerini yüklemek için yönetici izni istiyor.", bundle: .main)
+    }
+
+    /// Root'a ait bir uygulamanın son değiştirme adımı. `validate` genişletilmez: bu, ayrı ve tipli tek
+    /// giriş noktasıdır. Komutu `RootSwap.command(for:)` sabit betikten kendisi kurar; yollar ve değerler
+    /// izin penceresinden ÖNCE sıkıca doğrulanır ve konumsal parametre olarak geçer. Yöntem zinciri,
+    /// iptal, geçici dizin ve çıktı akışı `run` ile aynıdır. Ayrıntılar: RootSwap.swift.
+    static func runSwap(_ request: RootSwap.Request, runner: CommandRunner,
+                        onLine: (@Sendable (String) -> Void)? = nil) async throws -> CommandResult {
+        let command = try RootSwap.command(for: request)
+        let chain = PrivilegeMechanism.chain(preferred: .preferred(), isAvailable: { $0.isAvailableOnThisSystem })
+        let text = String(localized: "Tazele, \(request.appName) uygulamasını güncellemek için yönetici izni istiyor.", bundle: .main)
+        return try await $promptOverride.withValue(text) {
+            try await run(command, chain: chain, backend: { backend(for: $0, runner: runner) }, onLine: onLine)
+        }
     }
 
     public static func run(_ command: [String], runner: CommandRunner,
