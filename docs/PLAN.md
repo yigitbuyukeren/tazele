@@ -30,4 +30,6 @@ Komut bayrakları (`softwareupdate`, `brew`, `pipx`, `uv`, `npm`) ve `SMAppServi
 ## Durum (30 Ekim 2026)
 Yapıldı: Homebrew (formül, cask, kendi güncelleyen cask), App Store (`mas`, sudo parola penceresi), npm, rustup, RubyGems (sistem Ruby'si hariç), pipx/uv (PyPI), Oh My Zsh, Sparkle uygulamaları (appcast + Homebrew cask yedeği), macOS güncellemeleri (yeniden başlatma istemeyenler kurulabilir, diğerleri Sistem Ayarları). Arama, yoksay/sabitle, ayarlar (otomatik kontrol, bildirim, Dock rozeti, oturum açılışı), TR/EN arayüz.
 
-Yapılmadı: Sparkle uygulamalarını Tazele'nin kendisinin kurması (imza doğrulamalı), Developer ID imzası ve notarization, adresi okunamayan `.pkg` ile kurulan uygulamalar (WARP, Tailscale), Touch ID ile yetkilendirme.
+Ayrıca: Sparkle uygulamalarını Tazele kendisi kurar (EdDSA imza doğrulama, kod imzası ve ekip kimliği kontrolü, geri alma); `.pkg` ile kurulanlar (WARP, Tailscale) satıcı beslemesiyle denetlenir; yönetici izni yerel yetki penceresiyle (Touch ID) istenir.
+
+Yapılmadı: Developer ID imzası ve notarization; yetki penceresi, gerçek Sparkle kurulumu ve DMG çıkarma gerçek bir uygulamada denenmedi.
