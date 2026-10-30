@@ -56,12 +56,21 @@ public enum Sparkle {
         return apps
     }
 
-    public static func parseAppcast(_ data: Data) -> [AppcastItem] {
+    /// `baseURL` verilirse göreli indirme adresleri (ör. Tailscale: `Tailscale-1.104.4-macos.zip`)
+    /// Sparkle'ın yaptığı gibi appcast adresine göre çözülür.
+    public static func parseAppcast(_ data: Data, baseURL: URL? = nil) -> [AppcastItem] {
         let delegate = AppcastDelegate()
         let parser = XMLParser(data: data)
         parser.delegate = delegate
         parser.parse()
-        return delegate.items
+        guard let baseURL else { return delegate.items }
+        return delegate.items.map { item in
+            var item = item
+            if let raw = item.url, URL(string: raw)?.scheme == nil {
+                item.url = URL(string: raw, relativeTo: baseURL)?.absoluteString ?? raw
+            }
+            return item
+        }
     }
 
     /// Kullanıcıya önerilebilecek kararlı kanal adları; bunun dışındaki (beta, rc, nightly, ...) atlanır.
@@ -139,7 +148,8 @@ public enum Sparkle {
         request.setValue("Tazele", forHTTPHeaderField: "User-Agent")
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200 else { return [] }
-        return parseAppcast(data)
+        // Yönlendirme olduysa göreli adresler son adrese göre çözülür.
+        return parseAppcast(data, baseURL: response.url ?? url)
     }
 }
 
