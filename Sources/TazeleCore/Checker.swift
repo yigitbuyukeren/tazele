@@ -124,7 +124,7 @@ public enum UpdateStep: Sendable {
     public var display: String {
         switch self {
         case .command(let c): c.joined(separator: " ")
-        case .privileged(let c): "sudo " + c.joined(separator: " ")
+        case .privileged(let c): "[yönetici] " + c.joined(separator: " ")
         case .sparkle(let item): "sparkle-install \(item.name)"
         }
     }

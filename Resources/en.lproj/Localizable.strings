@@ -69,3 +69,12 @@
 "Listeye geri al" = "Put back on the list";
 "Beta veya sürüm adayı" = "Beta or release candidate";
 "Bu uygulama Tazele'den kurulamaz" = "This app cannot be installed by Tazele";
+"Tazele, App Store ve macOS güncellemelerini yüklemek için yönetici izni istiyor." = "Tazele wants administrator permission to install App Store and macOS updates.";
+"Sistem izin penceresi açılamadı; başka bir yöntem deneniyor." = "The system permission dialog couldn't be opened; trying another method.";
+"Bu komut yönetici olarak çalıştırılamaz: %@" = "This command can't be run as administrator: %@";
+"Araç bulunamadı: %@" = "Tool not found: %@";
+"Yönetici izni iptal edildi." = "Administrator permission was cancelled.";
+"Yönetici izni verilmedi." = "Administrator permission was denied.";
+"Yönetici izni alınamadı: %@" = "Couldn't get administrator permission: %@";
+"Yönetici izni isteyecek kullanılabilir bir yöntem yok." = "No method is available to request administrator permission.";
+"Yönetici olarak çalışan komutun sonucu okunamadı." = "The result of the command run as administrator couldn't be read.";
