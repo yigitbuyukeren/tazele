@@ -50,3 +50,11 @@ public struct OutdatedItem: Identifiable, Hashable, Sendable {
         self.installable = installable
     }
 }
+
+extension OutdatedItem {
+    /// Aynı öğeyi, Homebrew cask belirteciyle döndürür (Sparkle uygulaması cask ile kurulmuşsa).
+    public func withCaskToken(_ token: String?) -> OutdatedItem {
+        OutdatedItem(source: source, name: name, installed: installed, latest: latest, appID: appID,
+                     path: path, caskToken: token, manager: manager, installable: installable)
+    }
+}

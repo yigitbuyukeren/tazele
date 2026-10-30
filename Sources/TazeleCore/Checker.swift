@@ -50,22 +50,36 @@ public enum Checker {
             return try Parsers.npm(r.output)
         } }
         let apps = Sparkle.scan().filter { !$0.isMacAppStore }
-        report.unknownFeedApps = apps.filter { $0.feedURL == nil }.map(\.name)
+        let feedless = apps.filter { $0.feedURL == nil }
+        report.unknownFeedApps = feedless.map(\.name)
+        let caskIndex = installed.contains("brew") ? await SparkleFallback.installedCaskTokens(runner: runner) : [:]
         let casks = report.items.filter { $0.source == .homebrewCask || $0.source == .selfUpdatingCask }.map(\.name)
         let candidates = apps.filter { app in app.feedURL != nil && !casks.contains { Sparkle.isSameApp(app.name, cask: $0) } }
         let found = await withTaskGroup(of: OutdatedItem?.self) { group -> [OutdatedItem] in
             for app in candidates {
-                group.addTask { Sparkle.outdated(app: app, items: await Sparkle.fetch(app.feedURL!)) }
+                group.addTask {
+                    guard let item = Sparkle.outdated(app: app, items: await Sparkle.fetch(app.feedURL!)) else { return nil }
+                    return item.withCaskToken(SparkleFallback.caskToken(for: app, in: caskIndex))
+                }
             }
             var result: [OutdatedItem] = []
             for await item in group { if let item { result.append(item) } }
             return result
         }
-        report.items += found.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        // Besleme adresi okunamayan uygulamalar: Homebrew'ün cask listesiyle sürüm karşılaştırması.
+        let viaCasks = await SparkleFallback.updatesFromCaskIndex(
+            apps: feedless.filter { app in !casks.contains { Sparkle.isSameApp(app.name, cask: $0) } })
+        report.items += (found + viaCasks).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+
+        // Ek kaynaklar: rustup, RubyGems, pipx/uv, Oh My Zsh.
+        let extra = await ExtraSources.check(runner: runner, searchPath: searchPath)
+        report.items += extra.items
+        report.errors.merge(extra.errors) { a, _ in a }
+        for tool in extra.missingTools where !report.missingTools.contains(tool) { report.missingTools.append(tool) }
         await collect("macOS", into: &report) {
             let r = try await runner.run(["softwareupdate", "-l"], timeout: 120)
             guard !r.timedOut else { throw CheckError.timedOut }
-            return Parsers.softwareUpdate(r.text)
+            return SystemUpdates.parse(r.text)
         }
         return report
     }
