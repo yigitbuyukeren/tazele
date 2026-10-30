@@ -44,7 +44,7 @@ final class Store {
     /// Tazele'nin kendisinin kurabileceği öğeler işaretlenebilir.
     static func isSelectable(_ item: OutdatedItem) -> Bool {
         switch item.source {
-        case .sparkle: item.caskToken != nil
+        case .sparkle: item.caskToken != nil || SparkleInstaller.canInstall(item)
         case .system: item.installable
         default: true
         }

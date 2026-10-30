@@ -1,7 +1,7 @@
 import Foundation
 
 /// Sparkle ile kendini güncelleyen uygulamaların tespiti: `SUFeedURL` + appcast.
-/// Tazele bu uygulamaları kendisi kurmaz; yalnızca yeni sürüm var mı diye bakar.
+/// İmza bilgisi (EdDSA) olan ve yazılabilir konumdakileri `SparkleInstaller` doğrulayarak kurabilir.
 public struct SparkleApp: Sendable, Equatable {
     public let name: String
     public let path: String
@@ -10,6 +10,8 @@ public struct SparkleApp: Sendable, Equatable {
     public let bundleVersion: String
     public let feedURL: URL?
     public let isMacAppStore: Bool
+    /// Info.plist `SUPublicEDKey`: Sparkle'ın EdDSA (Ed25519) açık anahtarı, base64 (32 bayt).
+    public var publicEDKey: String? = nil
 }
 
 public struct AppcastItem: Sendable, Equatable {
@@ -18,6 +20,11 @@ public struct AppcastItem: Sendable, Equatable {
     public var minimumSystem: String?
     public var channel: String?
     public var hardware: String?         // sparkle:hardwareRequirements (ör. "arm64")
+    public var url: String?              // <enclosure url="...">
+    public var edSignature: String?      // <enclosure sparkle:edSignature="..."> (base64, 64 bayt)
+    public var length: Int64?            // <enclosure length="...">
+    public var type: String?             // <enclosure type="..."> (MIME türü)
+    public var installationType: String? // sparkle:installationType ("application", "package", ...)
 }
 
 public enum Sparkle {
@@ -42,7 +49,8 @@ public enum Sparkle {
                     shortVersion: info["CFBundleShortVersionString"] as? String ?? "",
                     bundleVersion: info["CFBundleVersion"] as? String ?? "",
                     feedURL: feed,
-                    isMacAppStore: FileManager.default.fileExists(atPath: "\(path)/Contents/_MASReceipt")))
+                    isMacAppStore: FileManager.default.fileExists(atPath: "\(path)/Contents/_MASReceipt"),
+                    publicEDKey: (info["SUPublicEDKey"] as? String).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }))
             }
         }
         return apps
@@ -90,7 +98,15 @@ public enum Sparkle {
         } else { return nil }
         guard isNewer else { return nil }
         return OutdatedItem(source: .sparkle, name: app.name, installed: app.shortVersion,
-                            latest: latest.shortVersion.map(cleanVersion) ?? latest.version ?? "?", path: app.path)
+                            latest: latest.shortVersion.map(cleanVersion) ?? latest.version ?? "?", path: app.path,
+                            download: download(for: app, item: latest))
+    }
+
+    /// Appcast öğesinin indirme bilgisi; adres yoksa nil. Kurulabilirlik ayrıca `SparkleInstaller.canInstall` ile denetlenir.
+    static func download(for app: SparkleApp, item: AppcastItem) -> SparkleDownload? {
+        guard let raw = item.url, let url = URL(string: raw) else { return nil }
+        return SparkleDownload(url: url, edSignature: item.edSignature, length: item.length, publicEDKey: app.publicEDKey,
+                               bundleID: app.bundleID, type: item.type, installationType: item.installationType)
     }
 
     /// Cask adına uyan, diskte kurulu uygulamanın gerçek sürümü (cask kaydı eski kalabilir).
@@ -167,14 +183,30 @@ private final class AppcastDelegate: NSObject, XMLParserDelegate {
     var items: [AppcastItem] = []
     private var current: AppcastItem?
     private var text = ""
+    /// `<sparkle:deltas>` içindeki fark (delta) eki tam arşiv değildir; atlanır.
+    private var deltaDepth = 0
+    private var sawEnclosure = false
 
     func parser(_ parser: XMLParser, didStartElement name: String, namespaceURI: String?, qualifiedName: String?, attributes: [String: String]) {
         text = ""
         switch name {
-        case "item": current = AppcastItem()
-        case "enclosure":
+        case "item": current = AppcastItem(); sawEnclosure = false; deltaDepth = 0
+        case "sparkle:deltas": deltaDepth += 1
+        case "enclosure" where deltaDepth == 0:
+            // Başka işletim sistemi için olan ek (ör. sparkle:os="windows") bu Mac'e uymaz.
+            if let os = attributes["sparkle:os"], os.lowercased() != "macos" { break }
             if current?.version == nil { current?.version = attributes["sparkle:version"] }
             if current?.shortVersion == nil { current?.shortVersion = attributes["sparkle:shortVersionString"] }
+            guard !sawEnclosure else { break }
+            sawEnclosure = true
+            func attr(_ key: String) -> String? {
+                attributes[key].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+            }
+            current?.url = attr("url")
+            current?.edSignature = attr("sparkle:edSignature")
+            current?.length = attr("length").flatMap { Int64($0) }.flatMap { $0 > 0 ? $0 : nil }
+            current?.type = attr("type")
+            current?.installationType = attr("sparkle:installationType")
         default: break
         }
     }
@@ -189,6 +221,7 @@ private final class AppcastDelegate: NSObject, XMLParserDelegate {
         case "sparkle:minimumSystemVersion": if !value.isEmpty { current?.minimumSystem = value }
         case "sparkle:channel": if !value.isEmpty { current?.channel = value }
         case "sparkle:hardwareRequirements": if !value.isEmpty { current?.hardware = value }
+        case "sparkle:deltas": deltaDepth = max(0, deltaDepth - 1)
         case "item": if let c = current { items.append(c) }; current = nil
         default: break
         }
