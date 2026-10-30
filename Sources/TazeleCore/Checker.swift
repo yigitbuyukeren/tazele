@@ -105,35 +105,76 @@ public enum CheckError: Error {
     }
 }
 
+/// Bir güncelleme adımı. Çoğu adım bir komuttur; root isteyenler ve Sparkle kurulumu ayrı yürütülür.
+public enum UpdateStep: Sendable {
+    case command([String])
+    /// Root gerektiren komut (örn. `mas update`, `softwareupdate -i`). `PrivilegedRunner` yürütür.
+    case privileged([String])
+    /// Sparkle uygulamasını Tazele'nin kendisi kurar (imza doğrulamalı). `SparkleInstaller` yürütür.
+    case sparkle(OutdatedItem)
+
+    /// Günlükte gösterilen satır.
+    public var display: String {
+        switch self {
+        case .command(let c): c.joined(separator: " ")
+        case .privileged(let c): "sudo " + c.joined(separator: " ")
+        case .sparkle(let item): "sparkle-install \(item.name)"
+        }
+    }
+
+    /// İlerleme panelinde gösterilen kısa ad.
+    public var shortTitle: String {
+        switch self {
+        case .command(let c), .privileged(let c):
+            c.prefix(2).map { ($0 as NSString).lastPathComponent }.joined(separator: " ")
+        case .sparkle(let item): item.name
+        }
+    }
+}
+
 public enum Updater {
-    /// Seçili öğeler için çalıştırılacak komutlar (kaynağa göre gruplanmış).
-    public static func commands(for items: [OutdatedItem]) -> [[String]] {
+    /// Seçili öğeler için sıralı güncelleme adımları (kaynağa göre gruplanmış).
+    public static func steps(for items: [OutdatedItem]) -> [UpdateStep] {
         func names(_ k: SourceKind) -> [String] { items.filter { $0.source == k }.map(\.name) }
-        var cmds: [[String]] = []
-        if !names(.homebrewFormula).isEmpty { cmds.append(["brew", "upgrade", "--formula"] + names(.homebrewFormula)) }
-        if !names(.homebrewCask).isEmpty { cmds.append(["brew", "upgrade", "--cask"] + names(.homebrewCask)) }
-        if !names(.selfUpdatingCask).isEmpty { cmds.append(["brew", "upgrade", "--cask", "--greedy"] + names(.selfUpdatingCask)) }
+        var steps: [UpdateStep] = []
+        func add(_ c: [String]) { steps.append(.command(c)) }
+        if !names(.homebrewFormula).isEmpty { add(["brew", "upgrade", "--formula"] + names(.homebrewFormula)) }
+        if !names(.homebrewCask).isEmpty { add(["brew", "upgrade", "--cask"] + names(.homebrewCask)) }
+        if !names(.selfUpdatingCask).isEmpty { add(["brew", "upgrade", "--cask", "--greedy"] + names(.selfUpdatingCask)) }
         let appIDs = items.filter { $0.source == .appStore }.compactMap(\.appID)
         if !appIDs.isEmpty {
             // `mas update` root ister; seçilen kimlikler tek tek geçilir.
-            cmds.append(["sudo", "-A", Privilege.locate("mas") ?? "mas", "update"] + appIDs)
+            steps.append(.privileged([Privilege.locate("mas") ?? "mas", "update"] + appIDs))
         }
-        if !names(.npm).isEmpty { cmds.append(["npm", "update", "-g"] + names(.npm)) }
-        if !names(.rustup).isEmpty { cmds.append(["rustup", "update"]) }
-        if !names(.gem).isEmpty { cmds.append(["gem", "update"] + names(.gem)) }
+        if !names(.npm).isEmpty { add(["npm", "update", "-g"] + names(.npm)) }
+        if !names(.rustup).isEmpty { add(["rustup", "update"]) }
+        if !names(.gem).isEmpty { add(["gem", "update"] + names(.gem)) }
         for item in items where item.source == .pythonTools {
-            cmds.append(item.manager == "uv" ? ["uv", "tool", "upgrade", item.name] : ["pipx", "upgrade", item.name])
+            add(item.manager == "uv" ? ["uv", "tool", "upgrade", item.name] : ["pipx", "upgrade", item.name])
         }
         if !names(.ohMyZsh).isEmpty {
-            cmds.append(["sh", "-c", "ZSH=\"${ZSH:-$HOME/.oh-my-zsh}\" \"$ZSH/tools/upgrade.sh\""])
+            add(["sh", "-c", "ZSH=\"${ZSH:-$HOME/.oh-my-zsh}\" \"$ZSH/tools/upgrade.sh\""])
         }
         // Yeniden başlatma istemeyen macOS güncellemeleri (ör. Command Line Tools).
         for item in items where item.source == .system && item.installable {
-            cmds.append(["sudo", "-A", "softwareupdate", "-i", item.manager ?? item.name])
+            steps.append(.privileged(["softwareupdate", "-i", item.manager ?? item.name]))
         }
-        // Homebrew cask'i olan Sparkle uygulamaları cask üzerinden güncellenir.
-        let sparkleCasks = items.filter { $0.source == .sparkle }.compactMap(\.caskToken)
-        if !sparkleCasks.isEmpty { cmds.append(["brew", "upgrade", "--cask", "--greedy"] + sparkleCasks) }
-        return cmds
+        // Sparkle uygulamaları: cask'i varsa Homebrew ile, yoksa Tazele kendisi kurar.
+        let sparkle = items.filter { $0.source == .sparkle }
+        let casks = sparkle.compactMap(\.caskToken)
+        if !casks.isEmpty { add(["brew", "upgrade", "--cask", "--greedy"] + casks) }
+        for item in sparkle where item.caskToken == nil && SparkleInstaller.canInstall(item) { steps.append(.sparkle(item)) }
+        return steps
+    }
+
+    /// Yalnızca komut tabanlı adımlar (root isteyenlerin başına `sudo -A` eklenir). Testler ve günlük için.
+    public static func commands(for items: [OutdatedItem]) -> [[String]] {
+        steps(for: items).compactMap {
+            switch $0 {
+            case .command(let c): c
+            case .privileged(let c): ["sudo", "-A"] + c
+            case .sparkle: nil
+            }
+        }
     }
 }

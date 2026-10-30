@@ -134,21 +134,27 @@ final class Store {
         finished = false
         failedSteps = 0
         log = []
-        let commands = Updater.commands(for: chosen)
-        steps = commands.count
+        let plan = Updater.steps(for: chosen)
+        steps = plan.count
         step = 0
         task = Task {
-            for command in commands {
+            for item in plan {
                 if Task.isCancelled { break }
                 step += 1
-                currentCommand = command.filter { $0 != "sudo" && $0 != "-A" }.prefix(2)
-                    .map { ($0 as NSString).lastPathComponent }.joined(separator: " ")
-                log.append("$ " + command.joined(separator: " "))
+                currentCommand = item.shortTitle
+                log.append("$ " + item.display)
+                let sink: @Sendable (String) -> Void = { line in Task { @MainActor in self.log.append(line) } }
                 do {
-                    let r = try await runner.run(command) { line in
-                        Task { @MainActor in self.log.append(line) }
+                    switch item {
+                    case .command(let command):
+                        let r = try await runner.run(command, onLine: sink)
+                        if r.status != 0 { failedSteps += 1; log.append(String(localized: "Çıkış kodu: \(Int(r.status))")) }
+                    case .privileged(let command):
+                        let r = try await PrivilegedRunner.run(command, runner: runner, onLine: sink)
+                        if r.status != 0 { failedSteps += 1; log.append(String(localized: "Çıkış kodu: \(Int(r.status))")) }
+                    case .sparkle(let app):
+                        try await SparkleInstaller.install(app, onLine: sink)
                     }
-                    if r.status != 0 { failedSteps += 1; log.append(String(localized: "Çıkış kodu: \(Int(r.status))")) }
                 } catch {
                     failedSteps += 1
                     log.append(String(localized: "Hata: \(error.localizedDescription)"))
