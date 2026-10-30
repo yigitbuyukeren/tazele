@@ -265,7 +265,7 @@ public enum PrivilegedCommand {
     static let allowedTools: Set<String> = ["mas", "softwareupdate"]
     /// Araç adı göreli verilirse önce yalnızca sistem dizinlerinde, sonra kullanıcı PATH'inde aranır.
     static let systemPath = "/usr/bin:/bin:/usr/sbin:/sbin"
-    static let softwareUpdateFlags: Set<String> = ["--agree-to-license", "--verbose"]
+    static let softwareUpdateFlags: Set<String> = ["--agree-to-license", "--verbose", "--restart"]
 
     /// `^[A-Za-z0-9._ +()-]+$`
     public static func isSafeArgument(_ s: String) -> Bool {

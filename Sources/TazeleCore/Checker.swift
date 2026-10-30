@@ -202,6 +202,19 @@ public enum Updater {
     /// Seçili öğeler için sıralı güncelleme adımları (kaynağa göre gruplanmış).
     public static func steps(for items: [OutdatedItem]) -> [UpdateStep] { plan(for: items).steps }
 
+    /// Yeniden başlatma isteyen tek bir macOS güncellemesi için plan: `softwareupdate -i <etiket> --restart`.
+    /// "Hepsini güncelle"ye hiç girmez; arayüz yalnızca kullanıcının açık onayından sonra çağırır.
+    public static func restartInstallPlan(for item: OutdatedItem) -> UpdatePlan {
+        var plan = UpdatePlan()
+        guard item.source == .system, !item.installable, let label = item.manager,
+              PrivilegedCommand.isSafeArgument(label), !label.hasPrefix("-") else {
+            plan.skipped.append(String(localized: "Geçersiz paket adı atlandı: \(item.name)", bundle: .main))
+            return plan
+        }
+        plan.steps.append(.privileged(["softwareupdate", "-i", label, "--restart"]))
+        return plan
+    }
+
     /// Seçili öğeler için plan. `masPath`: root olarak çalıştırılabilecek güvenilir `mas` (yoksa App Store
     /// öğeleri atlanır ve kullanıcı App Store'a yönlendirilir).
     /// Ad argümanlarından önce, aracın desteklediği yerde `--` konur (brew, npm, gem: kaynak koduyla doğrulandı).

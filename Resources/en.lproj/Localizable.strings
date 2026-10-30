@@ -119,3 +119,12 @@
 "Arşiv imza doğrulamasından sonra değişti; kurulum durduruldu" = "The archive changed after signature verification; installation stopped";
 "Arşiv güvenli değil (dışarıya yazan yol, bağ, özel dosya ya da aşırı boyut)" = "Unsafe archive (escaping path, link, special file, or excessive size)";
 "Kurulu uygulama taramadan sonra değişti; yeniden tarayıp dene" = "The installed app changed after scanning; scan again and retry";
+"Tazele, güncellemeleri tek seferde yüklemek için yönetici izni istiyor." = "Tazele wants administrator permission to install updates in one go.";
+"Yönetici izni ver (Touch ID veya parola)" = "Grant administrator permission (Touch ID or password)";
+"Yönetici izni açık; bırakmak için tıkla" = "Administrator permission is on; click to release";
+"%@ kurulsun ve Mac yeniden başlatılsın mı?" = "Install %@ and restart the Mac?";
+"Kurulum bitince Mac kendiliğinden yeniden başlar. Açık belgelerini kaydet; kurulum sırasında Mac'i kapatma ve şarjda tut." = "The Mac restarts by itself when the installation finishes. Save your open documents; don't shut the Mac down during installation and keep it plugged in.";
+"Bu bir beta / Release Candidate sürümüdür; önce Time Machine yedeği almanı öneririz." = "This is a beta / Release Candidate; we recommend making a Time Machine backup first.";
+"Kur ve yeniden başlat" = "Install and restart";
+"Vazgeç" = "Cancel";
+"Güncellemeyi kurar ve Mac'i yeniden başlatır (onay ister)" = "Installs the update and restarts the Mac (asks for confirmation)";

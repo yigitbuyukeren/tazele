@@ -192,3 +192,25 @@ import Testing
         #expect(Sparkle.installedVersion(matchingCask: "iina", directories: [dir.path]) == nil)
     }
 }
+
+@Suite struct RestartInstallPlanTests {
+    @Test func restartingSystemUpdateGetsRestartFlag() throws {
+        let item = OutdatedItem(source: .system, name: "macOS 27.2", installed: "", latest: "27.2",
+                                manager: "macOS 27.2 Release Candidate-26B123", installable: false)
+        let plan = Updater.restartInstallPlan(for: item)
+        #expect(plan.skipped.isEmpty)
+        guard case .privileged(let command)? = plan.steps.first else { Issue.record("adım yok"); return }
+        #expect(command == ["softwareupdate", "-i", "macOS 27.2 Release Candidate-26B123", "--restart"])
+    }
+
+    @Test func nonSystemOrOptionLikeLabelIsRejected() {
+        let brew = OutdatedItem(source: .homebrewFormula, name: "x", installed: "1", latest: "2", manager: "x")
+        let option = OutdatedItem(source: .system, name: "x", installed: "", latest: "2", manager: "--evil")
+        let installable = OutdatedItem(source: .system, name: "CLT", installed: "", latest: "2", manager: "CLT", installable: true)
+        for item in [brew, option, installable] {
+            let plan = Updater.restartInstallPlan(for: item)
+            #expect(plan.steps.isEmpty)
+            #expect(plan.skipped.count == 1)
+        }
+    }
+}

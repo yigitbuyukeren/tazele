@@ -58,6 +58,20 @@ public enum PrivilegedRunner {
         promptOverride ?? String(localized: "Tazele, App Store ve macOS güncellemelerini yüklemek için yönetici izni istiyor.", bundle: .main)
     }
 
+    /// Yönetici iznini (Touch ID / parola) komut çalıştırmadan önceden alır; geçerli olduğu sürece güncelleme
+    /// adımları yeniden sormaz. Kalıcı bir sudo kuralı yazmaz: izin yalnızca bu süreçte ve boşta 5 dakika yaşar.
+    public static func grantAdministrator() async throws {
+        let icon = Bundle.main.path(forResource: "AppIcon", ofType: "icns")
+        let prompt = String(localized: "Tazele, güncellemeleri tek seferde yüklemek için yönetici izni istiyor.", bundle: .main)
+        try await AuthorizationSession.shared.preauthorize(prompt: prompt, iconPath: icon)
+    }
+
+    /// Yönetici izni geçerliyse kalan boşta süresi; yoksa nil.
+    public static var administratorTimeRemaining: TimeInterval? { AuthorizationSession.shared.remaining }
+
+    /// Önceden alınmış yönetici iznini bırakır.
+    public static func revokeAdministrator() { AuthorizationSession.shared.revoke() }
+
     /// Root'a ait bir uygulamanın son değiştirme adımı. `validate` genişletilmez: bu, ayrı ve tipli tek
     /// giriş noktasıdır. Komutu `RootSwap.command(for:)` sabit betikten kendisi kurar; yollar ve değerler
     /// izin penceresinden ÖNCE sıkıca doğrulanır ve konumsal parametre olarak geçer. Yöntem zinciri,
@@ -394,6 +408,45 @@ final class AuthorizationSession: @unchecked Sendable {
             }
         }
     }
+
+    /// Hiçbir komut çalıştırmadan yönetici iznini önceden alır (Touch ID / parola penceresi). Sonraki
+    /// root adımları boşta kalma süresi dolana kadar yeniden sormaz.
+    func preauthorize(prompt: String, iconPath: String?) async throws {
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            queue.async {
+                c.resume(with: Result { try self.preauthorizeOnQueue(prompt: prompt, iconPath: iconPath) })
+            }
+        }
+    }
+
+    private func preauthorizeOnQueue(prompt: String, iconPath: String?) throws {
+        if let lastUse, Date().timeIntervalSince(lastUse) > Self.idleLimit { reset() }
+        if ref == nil {
+            var created: AuthorizationRef?
+            let status = AuthorizationCreate(nil, nil, [], &created)
+            guard status == errAuthorizationSuccess, let created else { throw AuthorizationTool.error(for: status) }
+            ref = created
+        }
+        guard let ref else { throw PrivilegeError.noMechanism }
+        let status = Self.copyRights(ref, prompt: prompt, iconPath: iconPath)
+        guard status == errAuthorizationSuccess else {
+            if status != errAuthorizationCanceled { reset() }
+            throw AuthorizationTool.error(for: status)
+        }
+        lastUse = Date()
+    }
+
+    /// İzin hâlâ geçerliyse bırakılacak süre (saniye); yoksa nil.
+    var remaining: TimeInterval? {
+        queue.sync {
+            guard ref != nil, let lastUse else { return nil }
+            let left = Self.idleLimit - Date().timeIntervalSince(lastUse)
+            return left > 0 ? left : nil
+        }
+    }
+
+    /// Hakları hemen bırakır.
+    func revoke() { queue.async { self.reset() } }
 
     /// Hakları silerek referansı bırakır; sonraki çalıştırma yeniden sorar.
     private func reset() {

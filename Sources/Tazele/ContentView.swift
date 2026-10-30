@@ -366,6 +366,11 @@ struct ContentView: View {
                 Text(item.name).font(.system(size: 12)).lineLimit(1)
                 if Store.isPrerelease(item) { BetaCapsule() }
                 Spacer()
+                Button { store.installSystemAndRestart(item) } label: {
+                    Label("Kur ve yeniden başlat", systemImage: "restart").font(.system(size: 11.5))
+                }
+                .buttonStyle(.link).disabled(store.isUpdating)
+                .help("Güncellemeyi kurar ve Mac'i yeniden başlatır (onay ister)")
                 Button {
                     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Software-Update-Settings.extension")!)
                 } label: { Label("Ayarlar", systemImage: "arrow.up.forward.app").font(.system(size: 11.5)) }
@@ -516,6 +521,22 @@ struct ContentView: View {
         }
     }
 
+    // MARK: Yönetici izni
+
+    private var adminButton: some View {
+        Button {
+            if store.adminRemaining == nil { store.grantAdmin() } else { store.revokeAdmin() }
+        } label: {
+            Image(systemName: store.adminRemaining == nil ? "lock.fill" : "lock.open.fill")
+                .foregroundStyle(store.adminRemaining == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Theme.brand))
+        }
+        .buttonStyle(.plain)
+        .help(store.adminRemaining == nil
+              ? String(localized: "Yönetici izni ver (Touch ID veya parola)")
+              : String(localized: "Yönetici izni açık; bırakmak için tıkla"))
+        .disabled(store.isUpdating)
+    }
+
     // MARK: Alt çubuk
 
     private var footer: some View {
@@ -524,6 +545,7 @@ struct ContentView: View {
                 Text("Son tarama \(date.formatted(date: .omitted, time: .shortened))")
             }
             Spacer()
+            adminButton
             Menu {
                 if !inWindow {
                     Button("Pencereyi aç") {

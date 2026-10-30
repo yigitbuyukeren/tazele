@@ -33,7 +33,7 @@ struct TazeleApp: App {
         }
         // Pencere boyutlanabilir; alt sınırı içeriğin en küçük çerçevesinden gelir.
         .windowResizability(.contentMinSize)
-        .defaultSize(width: 400, height: 560)
+        .defaultSize(width: 480, height: 680)
         .defaultPosition(.center)
 
         MenuBarExtra {

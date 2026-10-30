@@ -19,6 +19,9 @@ final class Store {
     var failedSteps = 0
     var missingTools: [String] = []
     var unknownFeedApps: [String] = []
+    /// Önceden alınmış yönetici izninin kalan süresi (saniye); yoksa nil.
+    var adminRemaining: TimeInterval?
+    var adminError: String?
 
     /// Yoksayılan öğeler; uygulama yeniden açılınca da korunur.
     private(set) var ignoreList = IgnoreList()
@@ -131,11 +134,33 @@ final class Store {
     func updateSelected() {
         let chosen = selectedItems
         guard !chosen.isEmpty, !isUpdating, !isChecking else { return }
+        run(Updater.plan(for: chosen))
+    }
+
+    /// Yeniden başlatma isteyen macOS güncellemesini, açık onaydan sonra kurar ve bilgisayarı yeniden başlatır.
+    func installSystemAndRestart(_ item: OutdatedItem) {
+        guard !isUpdating, !isChecking else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = String(localized: "\(item.name) kurulsun ve Mac yeniden başlatılsın mı?")
+        var info = String(localized: "Kurulum bitince Mac kendiliğinden yeniden başlar. Açık belgelerini kaydet; kurulum sırasında Mac'i kapatma ve şarjda tut.")
+        if Self.isPrerelease(item) {
+            info += "\n\n" + String(localized: "Bu bir beta / Release Candidate sürümüdür; önce Time Machine yedeği almanı öneririz.")
+        }
+        alert.informativeText = info
+        alert.addButton(withTitle: String(localized: "Kur ve yeniden başlat"))
+        alert.addButton(withTitle: String(localized: "Vazgeç"))
+        NSApp.activate()
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        isUpdating = true
+        run(Updater.restartInstallPlan(for: item))
+    }
+
+    private func run(_ updatePlan: UpdatePlan) {
         isUpdating = true
         finished = false
         failedSteps = 0
         log = []
-        let updatePlan = Updater.plan(for: chosen)
         let plan = updatePlan.steps
         steps = plan.count
         step = 0
@@ -174,4 +199,29 @@ final class Store {
     }
 
     func cancel() { task?.cancel() }
+
+    /// Touch ID / parola penceresini açar; verilirse güncellemeler yeniden sormaz.
+    func grantAdmin() {
+        adminError = nil
+        Task {
+            do {
+                try await PrivilegedRunner.grantAdministrator()
+            } catch PrivilegeError.canceled {
+            } catch {
+                adminError = error.localizedDescription
+            }
+            refreshAdmin()
+            while adminRemaining != nil {
+                try? await Task.sleep(for: .seconds(5))
+                refreshAdmin()
+            }
+        }
+    }
+
+    func revokeAdmin() {
+        PrivilegedRunner.revokeAdministrator()
+        Task { try? await Task.sleep(for: .milliseconds(100)); refreshAdmin() }
+    }
+
+    func refreshAdmin() { adminRemaining = PrivilegedRunner.administratorTimeRemaining }
 }
