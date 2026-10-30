@@ -106,3 +106,9 @@
 "Yeniden açılıyor: %@" = "Reopening: %@";
 "Uygulama yeniden açılamadı; elle açabilirsin" = "The app could not be reopened; you can open it manually";
 "%@ güncellendi: %@" = "%@ updated: %@";
+"Uygulama güncellemesi için yönetici izni istenecek" = "Administrator permission will be requested to update an app";
+"Tazele, %@ uygulamasını güncellemek için yönetici izni istiyor." = "Tazele needs administrator permission to update %@.";
+"Yönetici olarak korumalı klasöre kopyalanıyor" = "Copying to a protected folder as administrator";
+"Yönetici olarak yeniden denetleniyor (kod imzası, ekip, paket kimliği, sürüm)" = "Re-checking as administrator (code signature, team, bundle ID, version)";
+"Yönetici izni isteniyor: %@" = "Requesting administrator permission: %@";
+"Uygulama yerinde bulunamadı; yönetici olarak değiştirme yarıda kalmış olabilir" = "App not found in place; the administrator swap may have been interrupted";
