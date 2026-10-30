@@ -8,6 +8,8 @@ import TazeleCore
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let background = BackgroundChecker()
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // @AppStorage varsayılanları yalnızca ayarlar penceresinde geçerlidir; UserDefaults.bool kayıtsız anahtar için false verir.
+        UserDefaults.standard.register(defaults: [Pref.dockBadge: true, Pref.notify: false, Pref.checkHours: 0])
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         background.reschedule()

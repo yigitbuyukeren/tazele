@@ -217,16 +217,7 @@ struct ContentView: View {
 
     private var trimmedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-    /// Büyük/küçük harf ve aksan duyarsız; Türkçe ı/İ de i sayılır.
-    private static func fold(_ s: String) -> String {
-        s.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil)
-            .replacingOccurrences(of: "ı", with: "i")
-    }
-
-    private func matches(_ name: String) -> Bool {
-        let q = trimmedQuery
-        return q.isEmpty || Self.fold(name).contains(Self.fold(q))
-    }
+    private func matches(_ name: String) -> Bool { SearchMatcher.matches(name, query: query) }
 
     private func visible(_ kind: SourceKind) -> [OutdatedItem] { store.items(in: kind).filter { matches($0.name) } }
 
