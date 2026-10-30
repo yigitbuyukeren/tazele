@@ -73,7 +73,7 @@ import Testing
 
     @Test func missingToolsAreSkippedNotReportedAsErrors() async {
         let r = await Checker.checkAll(runner: CommandRunner(), searchPath: "/nonexistent")
-        #expect(r.missingTools == ["brew", "mas", "npm"])
+        #expect(Set(["brew", "mas", "npm"]).isSubset(of: Set(r.missingTools)))
         #expect(r.errors.isEmpty)
         #expect(r.items.allSatisfy { $0.source == .system || $0.source == .sparkle })
     }

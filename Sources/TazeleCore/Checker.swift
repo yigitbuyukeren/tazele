@@ -69,6 +69,8 @@ public enum Checker {
         // Besleme adresi okunamayan uygulamalar: Homebrew'ün cask listesiyle sürüm karşılaştırması.
         let viaCasks = await SparkleFallback.updatesFromCaskIndex(
             apps: feedless.filter { app in !casks.contains { Sparkle.isSameApp(app.name, cask: $0) } })
+        // Cask listesiyle denetlenebilenler artık "okunamayan" sayılmaz.
+        report.unknownFeedApps = feedless.map(\.name).filter { name in !viaCasks.contains { $0.name == name } }
         report.items += (found + viaCasks).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
         // Ek kaynaklar: rustup, RubyGems, pipx/uv, Oh My Zsh.
