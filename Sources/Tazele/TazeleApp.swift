@@ -29,7 +29,9 @@ struct TazeleApp: App {
             ContentView(store: sharedStore, inWindow: true)
                 .task { if sharedStore.lastChecked == nil { sharedStore.check() } }
         }
-        .windowResizability(.contentSize)
+        // Pencere boyutlanabilir; alt sınırı içeriğin en küçük çerçevesinden gelir.
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 400, height: 560)
         .defaultPosition(.center)
 
         MenuBarExtra {

@@ -18,29 +18,80 @@ final class Store {
     var finished = false
     var failedSteps = 0
     var missingTools: [String] = []
+    var unknownFeedApps: [String] = []
+
+    /// Yoksayılan öğeler; uygulama yeniden açılınca da korunur.
+    private(set) var ignoreList = IgnoreList()
 
     private let runner = CommandRunner()
     private var task: Task<Void, Never>?
 
-    var selectedItems: [OutdatedItem] { items.filter { selection.contains($0.id) && $0.source != .system && $0.source != .sparkle } }
+    /// Yoksayılanlar dışındaki öğeler: listeler, sayılar ve seçim bunlardan hesaplanır.
+    var activeItems: [OutdatedItem] { items.filter { !ignoreList.isIgnored($0) } }
 
-    var updatableItems: [OutdatedItem] { items.filter { $0.source != .system } }
-    var unknownFeedApps: [String] = []
+    /// Son taramada görünen ama yoksayılan öğeler.
+    var ignoredItems: [OutdatedItem] { items.filter { ignoreList.isIgnored($0) } }
 
-    func items(in kind: SourceKind) -> [OutdatedItem] { items.filter { $0.source == kind } }
+    var selectedItems: [OutdatedItem] { activeItems.filter { selection.contains($0.id) && Self.isSelectable($0) } }
+
+    /// Menü çubuğu ve Dock sayısı: macOS satırları ayrı gösterilir, sayılmaz.
+    var updatableItems: [OutdatedItem] { activeItems.filter { $0.source != .system } }
+
+    func items(in kind: SourceKind) -> [OutdatedItem] { activeItems.filter { $0.source == kind } }
+
+    func selectableItems(in kind: SourceKind) -> [OutdatedItem] { items(in: kind).filter(Self.isSelectable) }
+
+    /// Tazele'nin kendisinin kurabileceği öğeler işaretlenebilir.
+    static func isSelectable(_ item: OutdatedItem) -> Bool {
+        switch item.source {
+        case .sparkle: item.caskToken != nil
+        case .system: item.installable
+        default: true
+        }
+    }
+
+    /// Taramadan sonra kendiliğinden işaretli gelenler; kendi güncelleyicisi olanlar ve macOS elle seçilir.
+    static func isSelectedByDefault(_ item: OutdatedItem) -> Bool {
+        isSelectable(item) && ![.system, .sparkle, .selfUpdatingCask].contains(item.source)
+    }
+
+    /// Beta / sürüm adayı macOS güncellemelerini ayırt eder (ör. "macOS 26.1 Beta", "RC 2", "26.1 RC").
+    static func isPrerelease(_ item: OutdatedItem) -> Bool {
+        let text = "\(item.name) \(item.latest)"
+        if text.range(of: "beta", options: .caseInsensitive) != nil { return true }
+        if text.range(of: "release candidate", options: .caseInsensitive) != nil { return true }
+        let words = text.split { !$0.isLetter && !$0.isNumber }
+        return words.contains { $0.hasPrefix("RC") && $0.dropFirst(2).allSatisfy(\.isNumber) }
+    }
 
     func isAllSelected(_ kind: SourceKind) -> Bool {
-        let group = items(in: kind)
+        let group = selectableItems(in: kind)
         return !group.isEmpty && group.allSatisfy { selection.contains($0.id) }
     }
 
     func toggleGroup(_ kind: SourceKind) {
-        let ids = Set(items(in: kind).map(\.id))
+        let ids = Set(selectableItems(in: kind).map(\.id))
         if isAllSelected(kind) { selection.subtract(ids) } else { selection.formUnion(ids) }
     }
 
     func toggle(_ item: OutdatedItem) {
+        guard Self.isSelectable(item) else { return }
         if selection.contains(item.id) { selection.remove(item.id) } else { selection.insert(item.id) }
+    }
+
+    /// Öğeyi listeden çıkarır; `versionOnly` ise daha yeni bir sürüm çıkınca geri gelir.
+    func ignore(_ item: OutdatedItem, versionOnly: Bool = false) {
+        ignoreList.ignore(item, versionOnly: versionOnly)
+        selection.remove(item.id)
+        Notifier.updateBadge(count: updatableItems.count)
+    }
+
+    func restore(id: String) {
+        ignoreList.restore(id: id)
+        if !isUpdating, let item = items.first(where: { $0.id == id }), Self.isSelectedByDefault(item) {
+            selection.insert(id)
+        }
+        Notifier.updateBadge(count: updatableItems.count)
     }
 
     private var seenIDs: Set<String>?
@@ -61,11 +112,13 @@ final class Store {
         errors = report.errors
         missingTools = report.missingTools
         unknownFeedApps = report.unknownFeedApps
-        selection = Set(report.items.filter { ![.system, .sparkle, .selfUpdatingCask].contains($0.source) }.map(\.id))
+        // Daha yeni sürümü çıkmış "bu sürümü yoksay" kayıtları temizlenir; öğe listeye döner.
+        ignoreList.pruneStale(current: report.items)
+        selection = Set(activeItems.filter(Self.isSelectedByDefault).map(\.id))
         lastChecked = .now
         isChecking = false
 
-        let current = Set(report.items.filter { $0.source != .system }.map(\.id))
+        let current = Set(updatableItems.map(\.id))
         if let seen = seenIDs, background, report.errors.isEmpty {
             let fresh = current.subtracting(seen).count
             if fresh > 0 { Notifier.notifyNew(count: fresh) }

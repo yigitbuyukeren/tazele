@@ -56,3 +56,15 @@
 "Rust" = "Rust";
 "Gem" = "Gem";
 "Python" = "Python";
+"Ara" = "Search";
+"Aramayı temizle" = "Clear search";
+"“%@” için sonuç yok" = "No results for “%@”";
+"Yoksay" = "Ignore";
+"Bu sürümü yoksay (%@)" = "Ignore this version (%@)";
+"Yoksayılanlar" = "Ignored";
+"Yoksayılanlar (%lld)" = "Ignored (%lld)";
+"yalnızca %@" = "%@ only";
+"Daha yeni bir sürüm çıkınca listeye geri döner" = "Comes back to the list when a newer version is released";
+"Geri al" = "Restore";
+"Listeye geri al" = "Put back on the list";
+"Beta veya sürüm adayı" = "Beta or release candidate";

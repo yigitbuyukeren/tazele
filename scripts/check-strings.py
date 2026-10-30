@@ -27,7 +27,7 @@ import plistlib
 dict_keys = plistlib.load(open(root / "Resources/en.lproj/Localizable.stringsdict", "rb"))
 keys = {norm_key(k): k for k in list(table) + list(dict_keys)}
 SKIP = {"Tazele", "GitHub", "macOS", "App Store", "npm", "Cask", "Homebrew (cask)"}
-constructs = re.compile(r'(?:Text|Button|Label|Toggle|Picker|String\(localized:|\.help)\(?\s*"((?:[^"\\]|\\.)*)"')
+constructs = re.compile(r'(?:Text|TextField|Button|Label|Toggle|Picker|String\(localized:|\.help)\(?\s*"((?:[^"\\]|\\.)*)"')
 missing, used = [], set()
 for f in sorted((root / "Sources").rglob("*.swift")):
     for lit in constructs.findall(f.read_text()):

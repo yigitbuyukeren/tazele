@@ -7,10 +7,16 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var overrides: [SourceKind: Bool] = [:]
     @State private var showLog = false
+    @State private var showIgnored = false
+    @State private var query = ""
+    @State private var listHeight: CGFloat = 0
+    @FocusState private var searchFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var spring: Animation? { reduceMotion ? nil : Theme.spring }
     private var swap: AnyTransition { reduceMotion ? .opacity : .materialize }
+    /// Menü çubuğu penceresinde liste bu yüksekliği aşınca kayar.
+    private let popoverListMax: CGFloat = 360
 
     var body: some View {
         VStack(spacing: 12) {
@@ -19,11 +25,18 @@ struct ContentView: View {
                 if store.isUpdating { progressCard.transition(swap) }
                 else if (store.isChecking && store.items.isEmpty) || store.lastChecked == nil { scanningCard.transition(swap) }
                 else if store.items.isEmpty && !store.errors.isEmpty { failedCard.transition(swap) }
-                else if store.updatableItems.isEmpty && store.items.isEmpty { upToDateCard.transition(swap) }
-                else {
-                    VStack(spacing: 12) { summaryCard; sourceList }.transition(swap)
+                else if store.activeItems.isEmpty {
+                    VStack(spacing: 12) {
+                        upToDateCard
+                        if !store.ignoreList.isEmpty { scrollArea { ignoredSection(store.ignoreList.entries, searching: false) } }
+                    }
+                    .transition(swap)
+                } else {
+                    VStack(spacing: 12) { summaryCard; searchField; sourceList }.transition(swap)
                 }
             }
+            // Pencerede liste kalan yüksekliği doldurur; alt bölüm aşağıda kalır.
+            .frame(maxHeight: inWindow ? .infinity : nil, alignment: .top)
             if store.finished && !store.isUpdating { resultBanner.transition(swap) }
             if !store.errors.isEmpty { errorBanner }
             if !store.isUpdating, !store.log.isEmpty { logDisclosure }
@@ -36,7 +49,10 @@ struct ContentView: View {
             footer
         }
         .padding(16)
-        .frame(width: 400)
+        .frame(width: inWindow ? nil : 400)
+        .frame(minWidth: inWindow ? 380 : nil, maxWidth: inWindow ? .infinity : nil,
+               minHeight: inWindow ? 440 : nil, maxHeight: inWindow ? .infinity : nil, alignment: .top)
+        .background { searchShortcut }
         .animation(spring, value: store.isUpdating)
         .animation(spring, value: store.isChecking)
         .animation(spring, value: store.finished)
@@ -68,6 +84,7 @@ struct ContentView: View {
                                value: store.isChecking)
             }
             .buttonStyle(IconButtonStyle())
+            .keyboardShortcut("r")
             .disabled(store.isChecking || store.isUpdating)
             .help("Yeniden tara")
         }
@@ -93,7 +110,8 @@ struct ContentView: View {
                     .contentTransition(.numericText())
                 VStack(alignment: .leading, spacing: 5) {
                     Text("güncelleme hazır").font(.system(size: 12.5, weight: .semibold)).tracking(0.1)
-                    HStack(spacing: 10) {
+                    // Kaynak sayısı artınca satır taşmasın diye alt satıra geçer.
+                    FlowLayout(spacing: 10, lineSpacing: 3) {
                         ForEach(SourceKind.allCases.filter { $0 != .system && !store.items(in: $0).isEmpty }, id: \.self) { kind in
                             HStack(spacing: 4) {
                                 Circle().fill(kind.tint).frame(width: 6, height: 6)
@@ -103,7 +121,7 @@ struct ContentView: View {
                         }
                     }
                 }
-                Spacer()
+                Spacer(minLength: 0)
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
         }
@@ -154,44 +172,117 @@ struct ContentView: View {
                 }
                 ProgressView(value: Double(store.step), total: Double(max(store.steps, 1)))
                     .tint(Theme.brandTop)
-                logBox(height: 170)
+                // Pencerede günlük kalan yüksekliği kullanır.
+                logBox(height: inWindow ? nil : 170)
             }
             .padding(14)
         }
     }
 
+    // MARK: Arama
+
+    private var searchField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.secondary)
+            TextField("Ara", text: $query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12.5))
+                .focused($searchFocused)
+                .onExitCommand { query = "" }
+            if !query.isEmpty {
+                Button { query = "" } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 12)).foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Aramayı temizle")
+                .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+            .strokeBorder(Theme.brandTop.opacity(searchFocused ? 0.6 : 0), lineWidth: 1))
+        .animation(spring, value: query.isEmpty)
+        .animation(spring, value: searchFocused)
+    }
+
+    /// ⌘F arama alanına odaklanır (görünmez düğme yalnızca kısayolu taşır).
+    private var searchShortcut: some View {
+        Button("") { searchFocused = true }
+            .keyboardShortcut("f")
+            .opacity(0).frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+    }
+
+    private var trimmedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// Büyük/küçük harf ve aksan duyarsız; Türkçe ı/İ de i sayılır.
+    private static func fold(_ s: String) -> String {
+        s.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil)
+            .replacingOccurrences(of: "ı", with: "i")
+    }
+
+    private func matches(_ name: String) -> Bool {
+        let q = trimmedQuery
+        return q.isEmpty || Self.fold(name).contains(Self.fold(q))
+    }
+
+    private func visible(_ kind: SourceKind) -> [OutdatedItem] { store.items(in: kind).filter { matches($0.name) } }
+
     // MARK: Kaynak listesi
 
     private var sourceList: some View {
-        ScrollView {
-            LazyVStack(spacing: 8) {
-                ForEach(SourceKind.allCases, id: \.self) { kind in
-                    if !store.items(in: kind).isEmpty { section(kind) }
-                }
+        let kinds = SourceKind.allCases.filter { !visible($0).isEmpty }
+        let ignored = store.ignoreList.entries.filter { matches(IgnoreList.split($0.id).name) }
+        return scrollArea {
+            VStack(spacing: 8) {
+                ForEach(kinds, id: \.self) { section($0) }
+                if kinds.isEmpty { noResults }
+                if !ignored.isEmpty { ignoredSection(ignored, searching: !trimmedQuery.isEmpty) }
             }
-            .padding(.vertical, 1)
         }
-        .scrollIndicators(.never)
-        .frame(minHeight: 150, idealHeight: inWindow ? 420 : 300, maxHeight: inWindow ? 420 : 300)
+    }
+
+    /// Pencerede kalan yüksekliği doldurur; menü çubuğunda içerik kadar, en fazla `popoverListMax` uzar.
+    private func scrollArea<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        ScrollView {
+            content()
+                .padding(.vertical, 1)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
+        }
+        .scrollIndicators(inWindow ? .automatic : .never)
+        .frame(height: inWindow ? nil : min(max(listHeight, 44), popoverListMax))
+        .frame(minHeight: inWindow ? 120 : nil, maxHeight: inWindow ? .infinity : nil)
+    }
+
+    private var noResults: some View {
+        Card {
+            Label {
+                Text("“\(trimmedQuery)” için sonuç yok").font(.system(size: 12)).lineLimit(2)
+            } icon: {
+                Image(systemName: "magnifyingglass").foregroundStyle(.tertiary)
+            }
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity).padding(.vertical, 16).padding(.horizontal, 12)
+        }
+        .transition(.opacity)
     }
 
     private func isExpanded(_ kind: SourceKind) -> Bool {
-        overrides[kind] ?? (store.items(in: kind).count <= 6)
+        if !trimmedQuery.isEmpty { return true }
+        return overrides[kind] ?? (store.items(in: kind).count <= 6)
     }
 
     private func section(_ kind: SourceKind) -> some View {
-        let group = store.items(in: kind)
+        let group = visible(kind)
         let expanded = isExpanded(kind)
         return Card {
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
                     Button { withAnimation(spring) { overrides[kind] = !expanded } } label: {
                         HStack(spacing: 10) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 7, style: .continuous).fill(kind.tint.gradient)
-                                Image(systemName: kind.symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
-                            }
-                            .frame(width: 26, height: 26)
+                            SourceBadge(kind: kind)
                             Text(kind.title).font(.system(size: 12.5, weight: .semibold))
                             Text("\(group.count)")
                                 .font(.system(size: 10.5, weight: .semibold, design: .rounded))
@@ -206,7 +297,7 @@ struct ContentView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(RowButtonStyle())
-                    if kind != .system && kind != .sparkle {
+                    if !store.selectableItems(in: kind).isEmpty {
                         Button { store.toggleGroup(kind) } label: { CheckCircle(isOn: store.isAllSelected(kind)) }
                             .buttonStyle(.plain).help("Tümünü seç / bırak")
                     }
@@ -222,8 +313,34 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder private func row(_ item: OutdatedItem) -> some View {
-        if item.source == .sparkle {
+    private func row(_ item: OutdatedItem) -> some View {
+        rowContent(item).contextMenu {
+            Button { withAnimation(spring) { store.ignore(item) } } label: {
+                Label("Yoksay", systemImage: "eye.slash")
+            }
+            if !item.latest.isEmpty {
+                Button { withAnimation(spring) { store.ignore(item, versionOnly: true) } } label: {
+                    Label("Bu sürümü yoksay (\(item.latest))", systemImage: "clock.arrow.circlepath")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func rowContent(_ item: OutdatedItem) -> some View {
+        if Store.isSelectable(item) {
+            Button { store.toggle(item) } label: {
+                HStack(spacing: 10) {
+                    CheckCircle(isOn: store.selection.contains(item.id))
+                    Text(item.name).font(.system(size: 12.5)).lineLimit(1)
+                    if item.source == .system && Store.isPrerelease(item) { BetaCapsule() }
+                    Spacer(minLength: 8)
+                    if !item.latest.isEmpty { VersionPill(installed: item.installed, latest: item.latest) }
+                }
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(RowButtonStyle())
+        } else if item.source == .sparkle {
             HStack(spacing: 10) {
                 Text(item.name).font(.system(size: 12.5)).lineLimit(1)
                 Spacer(minLength: 8)
@@ -233,9 +350,11 @@ struct ContentView: View {
                     .help("Uygulamayı aç; güncellemeyi kendi güncelleyicisinden yükle")
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
-        } else if item.source == .system {
-            HStack {
+        } else {
+            // Yeniden başlatma isteyen macOS güncellemeleri Sistem Ayarları'ndan yüklenir.
+            HStack(spacing: 8) {
                 Text(item.name).font(.system(size: 12)).lineLimit(1)
+                if Store.isPrerelease(item) { BetaCapsule() }
                 Spacer()
                 Button {
                     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Software-Update-Settings.extension")!)
@@ -243,19 +362,67 @@ struct ContentView: View {
                     .buttonStyle(.link)
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
-        } else {
-            Button { store.toggle(item) } label: {
-                HStack(spacing: 10) {
-                    CheckCircle(isOn: store.selection.contains(item.id))
-                    Text(item.name).font(.system(size: 12.5)).lineLimit(1)
-                    Spacer(minLength: 8)
-                    VersionPill(installed: item.installed, latest: item.latest)
-                }
-                .padding(.horizontal, 12).padding(.vertical, 6)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(RowButtonStyle())
         }
+    }
+
+    // MARK: Yoksayılanlar
+
+    private func ignoredSection(_ entries: [IgnoreList.Entry], searching: Bool) -> some View {
+        let expanded = showIgnored || searching
+        return Card {
+            VStack(spacing: 0) {
+                Button { withAnimation(spring) { showIgnored.toggle() } } label: {
+                    HStack(spacing: 10) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.secondary.opacity(0.45).gradient)
+                            Image(systemName: "eye.slash.fill").font(.system(size: 11, weight: .semibold)).foregroundStyle(.white)
+                        }
+                        .frame(width: 26, height: 26)
+                        Text("Yoksayılanlar").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.secondary)
+                        Text("\(entries.count)")
+                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                            .padding(.horizontal, 6).padding(.vertical, 1.5)
+                            .background(.primary.opacity(0.08), in: Capsule())
+                        Spacer()
+                        if !searching {
+                            Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(.tertiary).rotationEffect(.degrees(expanded ? 90 : 0))
+                        }
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(RowButtonStyle())
+                .accessibilityLabel(Text("Yoksayılanlar (\(entries.count))"))
+
+                if expanded {
+                    Divider().opacity(0.5)
+                    VStack(spacing: 0) { ForEach(entries, id: \.id) { ignoredRow($0) } }
+                        .transition(.opacity)
+                }
+            }
+        }
+    }
+
+    private func ignoredRow(_ entry: IgnoreList.Entry) -> some View {
+        let parts = IgnoreList.split(entry.id)
+        return HStack(spacing: 8) {
+            Circle().fill(parts.source?.tint ?? .gray).frame(width: 6, height: 6)
+            Text(parts.name).font(.system(size: 12.5)).lineLimit(1).foregroundStyle(.secondary)
+            if let kind = parts.source {
+                Text(kind.shortTitle).font(.system(size: 10.5)).foregroundStyle(.tertiary).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            if let version = entry.version {
+                Text("yalnızca \(version)")
+                    .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                    .help("Daha yeni bir sürüm çıkınca listeye geri döner")
+            }
+            Button("Geri al") { withAnimation(spring) { store.restore(id: entry.id) } }
+                .buttonStyle(.link).font(.system(size: 11.5))
+                .help("Listeye geri al")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 6)
     }
 
     // MARK: Hata, günlük, eylem
@@ -295,7 +462,8 @@ struct ContentView: View {
         }
     }
 
-    private func logBox(height: CGFloat) -> some View {
+    /// `height` nil ise kutu en az 170pt olur ve kalan yüksekliği doldurur.
+    private func logBox(height: CGFloat?) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 Text(store.log.joined(separator: "\n"))
@@ -308,6 +476,7 @@ struct ContentView: View {
             .onChange(of: store.log.count) { proxy.scrollTo("end", anchor: .bottom) }
         }
         .frame(height: height)
+        .frame(minHeight: height == nil ? 170 : nil, maxHeight: height == nil ? .infinity : nil)
         .padding(8)
         .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
     }
@@ -325,7 +494,10 @@ struct ContentView: View {
         .opacity(store.isUpdating ? 0.5 : 1)
     }
 
-    private var needsPasswordHint: Bool { store.selectedItems.contains { $0.source == .appStore } }
+    /// App Store ve macOS güncellemeleri `sudo` ile çalışır.
+    private var needsPasswordHint: Bool {
+        store.selectedItems.contains { $0.source == .appStore || $0.source == .system }
+    }
 
     // MARK: Alt çubuk
 
@@ -360,6 +532,29 @@ struct ContentView: View {
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         }
         .font(.system(size: 11)).tracking(0.15).foregroundStyle(.tertiary)
+    }
+}
+
+private struct SourceBadge: View {
+    let kind: SourceKind
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous).fill(kind.tint.gradient)
+            Image(systemName: kind.symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
+        }
+        .frame(width: 26, height: 26)
+    }
+}
+
+/// Beta veya sürüm adayı macOS güncellemelerinin yanında görünen turuncu etiket.
+private struct BetaCapsule: View {
+    var body: some View {
+        Text(verbatim: "beta")
+            .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(0.3)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 5).padding(.vertical, 1.5)
+            .background(Color.orange, in: Capsule())
+            .help("Beta veya sürüm adayı")
     }
 }
 
