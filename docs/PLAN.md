@@ -9,13 +9,14 @@ Tazele dosya kurmaz, mevcut araçları yönetir (`brew`, `mas`, `npm`, uygulamal
 ## Neden
 MacUpdater geliştirmeyi bıraktı (sunucu desteği 2026-12-31'e kadar). Topgrade yalnızca komut satırı, Latest yalnızca App Store ve Sparkle, Cork ve Applite yalnızca Homebrew.
 
-## Aşamalar
+## İlk plan (tarihsel)
+Güncel uygulama kapsamı ve kalan doğrulamalar aşağıdaki tarihli Durum bölümündedir; ilk aşamalar güncel eksik listesi değildir.
 1. **MVP:** menü çubuğu listesi, tek tek ve "hepsini güncelle", canlı log. Kaynaklar: Homebrew (formül, cask, greedy anahtarı), `mas`, npm, pipx/uv, rustup, Oh-My-Zsh. macOS sistem güncellemeleri yalnızca listelenir, kurulum için Sistem Ayarları açılır.
 2. Sparkle uygulama tespiti (`SUFeedURL` + appcast), gem/go/cargo, yoksay ve sabitle, bildirimler.
 3. Ayrıcalıklı yardımcı süreç, kendi sürüm veritabanı.
 
 ## Teknik
-- SwiftPM, Swift 6, SwiftUI + AppKit, macOS 15+. Sandbox dışı; Developer ID ile imza ve notarization.
+- SwiftPM, Swift 6, SwiftUI + AppKit, macOS 15+. Sandbox dışı; Developer ID ile imza ve notarization hedeflenir, henüz tamamlanmadı.
 - `Process` + `Pipe` → `AsyncStream`, iptalde `terminate()`; çalıştırıcı bir `actor`, arayüz `@MainActor`.
 - `PATH` açıkça ayarlanır (`/opt/homebrew/bin`, nvm/asdf/mise); `HOMEBREW_NO_AUTO_UPDATE`, `NONINTERACTIVE=1`, `CI=1`. Brew gibi kilitli araçlar sırayla çalışır.
 - Kontrol: `brew outdated --json=v2`, `mas outdated`, `npm outdated -g --json`, `pipx list --json`, `uv tool list`, `rustup check`, `softwareupdate -l`.

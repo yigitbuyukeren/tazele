@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate()
         background.reschedule()
         NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.background.reschedule()
+            Task { @MainActor [weak self] in self?.background.reschedule() }
         }
     }
 

@@ -50,7 +50,7 @@ enum Notifier {
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
-    static func updateBadge(count: Int) {
+    @MainActor static func updateBadge(count: Int) {
         NSApp.dockTile.badgeLabel = UserDefaults.standard.bool(forKey: Pref.dockBadge) && count > 0 ? "\(count)" : nil
     }
 }
